@@ -19,12 +19,15 @@ class OutputType(str, Enum):
 
 class ModelConfig(BaseModel):
     provider: str = Field(default="openai", description="LangChain 模型 provider")
-    model: str = Field(default="qwen-plus", description="模型名称")
+    model: str = Field(default="qwen-plus", description="文本模型名称")
+    vision_model: str = Field(default="qwen-vl-max", description="多模态视觉模型名称")
     api_key: str | None = Field(default=None, description="可选，优先于环境变量")
     base_url: str | None = Field(default=None, description="OpenAI compatible base url")
     temperature: float = Field(default=0.4, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=512, le=32000)
     enable_deepagents: bool = Field(default=True)
+    enable_vision: bool = Field(default=True, description="是否用多模态模型真正读取图片")
+    max_vision_images: int = Field(default=4, ge=1, le=12)
 
 
 class TypographyConfig(BaseModel):

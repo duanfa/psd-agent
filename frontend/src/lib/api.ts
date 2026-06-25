@@ -4,11 +4,14 @@ export type OutputType = "detail_page" | "main_image" | "banner";
 export interface ModelConfig {
   provider: string;
   model: string;
+  vision_model: string;
   api_key?: string;
   base_url?: string;
   temperature: number;
   max_tokens: number;
   enable_deepagents: boolean;
+  enable_vision: boolean;
+  max_vision_images: number;
 }
 
 export interface TypographyConfig {

@@ -34,11 +34,14 @@ def default_workflow_payload() -> dict[str, Any]:
         "model_config": {
             "provider": "openai",
             "model": "qwen-plus",
+            "vision_model": "qwen-vl-max",
             "api_key": "",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "temperature": 0.4,
             "max_tokens": 4096,
             "enable_deepagents": True,
+            "enable_vision": True,
+            "max_vision_images": 4,
         },
         "typography": {
             "title_font": "方正兰亭特黑简体",

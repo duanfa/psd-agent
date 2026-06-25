@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from .llm import LLMClient, LLMUnavailable
@@ -65,6 +66,14 @@ class PipelineContext:
     @property
     def images(self) -> list[str]:
         return [a.name for a in self.assets if a.bucket == "image"]
+
+    @property
+    def image_paths(self) -> list[str]:
+        return [
+            a.saved_path
+            for a in self.assets
+            if a.bucket == "image" and a.saved_path
+        ]
 
     @property
     def fonts(self) -> list[str]:
@@ -149,17 +158,37 @@ def _run_stage(
 def stage_vision(ctx: PipelineContext) -> StageResult:
     req = ctx.request
 
+    settings = req.model_settings
+
     def model_fn() -> dict[str, Any]:
+        image_names = ctx.images
         prompt = (
             f"商品名称：{req.product_name}\n"
             f"品牌：{req.brand_name}\n"
-            f"商品图文件名（按命名推断用途）：{ctx.images}\n"
+            f"商品图文件名：{image_names}\n"
             f"brief 文本：\n{req.product_brief}\n\n"
             "请输出商品视觉理解结果，字段："
             "product_type, main_color, material, key_features(数组), "
             "usable_images(对象，含 hero_image、detail_images 数组、scene_images 数组)。"
         )
+        image_paths = ctx.image_paths[: settings.max_vision_images]
+        if image_paths and settings.enable_vision:
+            try:
+                data = ctx.llm.invoke_vision_json(
+                    req.prompts.vision_agent_prompt, prompt, image_paths
+                )
+                data["_vision"] = {
+                    "mode": "multimodal",
+                    "model": settings.vision_model,
+                    "images": [Path(p).name for p in image_paths],
+                }
+                ctx.product_info = data
+                return data
+            except LLMUnavailable as exc:
+                ctx.warnings.append(f"[vision] 多模态识别不可用，转文本推断：{exc}")
+
         data = ctx.llm.invoke_json(req.prompts.vision_agent_prompt, prompt)
+        data["_vision"] = {"mode": "text", "model": settings.model}
         ctx.product_info = data
         return data
 
@@ -181,7 +210,14 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
 
     def summarize(data: dict[str, Any], used: bool) -> str:
         feats = "、".join(data.get("key_features", [])[:4])
-        prefix = "视觉模型识别" if used else "按文件名/brief 规则推断"
+        mode = (data.get("_vision") or {}).get("mode")
+        if not used:
+            prefix = "按文件名/brief 规则推断"
+        elif mode == "multimodal":
+            count = len((data.get("_vision") or {}).get("images", []))
+            prefix = f"多模态识别（读取 {count} 张图片）"
+        else:
+            prefix = "文本模型推断"
         return f"{prefix}：{data.get('product_type', req.product_name)}，主色 {data.get('main_color', '-')}，关键特征：{feats}。"
 
     return _run_stage(

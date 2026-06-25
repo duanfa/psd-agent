@@ -319,10 +319,27 @@ export function PsdWorkflowApp() {
                     onChange={(e) => setModel("provider", e.target.value)}
                   />
                 </Field>
-                <Field label="Model">
+                <Field label="文本模型">
                   <input
                     value={payload.model_config.model}
                     onChange={(e) => setModel("model", e.target.value)}
+                  />
+                </Field>
+                <Field label="视觉模型（多模态）">
+                  <input
+                    value={payload.model_config.vision_model}
+                    onChange={(e) => setModel("vision_model", e.target.value)}
+                  />
+                </Field>
+                <Field label={`视觉最多读图 · ${payload.model_config.max_vision_images}`}>
+                  <input
+                    max={12}
+                    min={1}
+                    type="range"
+                    value={payload.model_config.max_vision_images}
+                    onChange={(e) =>
+                      setModel("max_vision_images", Number(e.target.value))
+                    }
                   />
                 </Field>
                 <Field label="Base URL">
@@ -368,6 +385,15 @@ export function PsdWorkflowApp() {
                 />
                 <span className="switch-track" />
                 使用 DeepAgents 执行多 Agent 链路（关闭则全程规则生成）
+              </label>
+              <label className="switch">
+                <input
+                  checked={payload.model_config.enable_vision}
+                  type="checkbox"
+                  onChange={(e) => setModel("enable_vision", e.target.checked)}
+                />
+                <span className="switch-track" />
+                视觉理解阶段用多模态模型真正读取上传图片
               </label>
             </Section>
 

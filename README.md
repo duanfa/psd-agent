@@ -20,7 +20,7 @@
 
 | 阶段 | 作用 | 产物 |
 |---|---|---|
-| 视觉理解模型 | 从商品图文件名 + brief 推断商品结构 | product_info |
+| 视觉理解模型 | 多模态模型真正读取上传图片识别商品（缺图/缺 Pillow 时回退文本推断） | product_info |
 | 商品结构化信息 | 合并视觉信息与 brief | structured_info |
 | 品牌 RAG | 提取品牌风格、配色、字体、模块顺序 | brand_profile |
 | 设计 Agent | 整体视觉方向、色调、图片策略、约束 | design_direction |
@@ -45,7 +45,10 @@ export DASHSCOPE_API_KEY=你的Key   # 或 OPENAI_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
 
-默认模型为 `qwen-plus`（DashScope OpenAI 兼容），可在界面或配置文件改成任意 provider。
+默认文本模型为 `qwen-plus`、视觉模型为 `qwen-vl-max`（DashScope OpenAI 兼容），可在界面或配置文件改成任意 provider。
+
+视觉理解阶段会把上传的商品图压缩后送入多模态模型（`enable_vision` 控制开关，`max_vision_images` 控制读图数量）。
+图片压缩依赖 Pillow，已包含在 `requirements.txt`；若未安装则自动回退为文本推断。
 
 ## 启动前端
 

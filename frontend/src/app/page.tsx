@@ -1,5 +1,5 @@
-import { PsdWorkflowApp } from "@/components/PsdWorkflowApp";
+import { redirect } from "next/navigation";
 
 export default function Page() {
-  return <PsdWorkflowApp />;
+  redirect("/create-task");
 }

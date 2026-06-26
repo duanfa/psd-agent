@@ -133,10 +133,195 @@ export interface WorkflowLogsResponse {
 export const API_BASE =
   process.env.NEXT_PUBLIC_PSD_AGENT_API_BASE ?? "http://localhost:8000";
 
-export async function fetchDefaults(): Promise<DefaultsResponse> {
-  const response = await fetch(`${API_BASE}/api/config/defaults`);
+async function fetchJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`默认配置加载失败：${response.status}`);
+    throw new Error(`${path} 加载失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export interface DashboardResponse {
+  page: {
+    title: string;
+    subtitle: string;
+    currentBrandName?: string;
+  };
+  hero: {
+    brandName: string;
+    status: string;
+    description: string;
+    tags: string[];
+    weeklyCompletionRate: number;
+    weeklyStatus: string;
+    weeklySummary: string;
+  };
+  stats: Array<{ label: string; value: string | number; description: string }>;
+  trainingTasks: Array<{ title: string; status: string; summary: string }>;
+  designTasks: Array<{ title: string; status: string; summary: string }>;
+  quickActions: Array<{ title: string; description: string; href: string }>;
+}
+
+export interface BrandAssetsPageResponse {
+  page: {
+    title: string;
+    subtitle: string;
+    folders: Array<{ name: string; description: string; icon: string }>;
+    uploadForm: { name: string; folder: string; source: string };
+  };
+  brands: Array<{ id: number; name: string; status: string; assets: number }>;
+  filters: { brandId: number; folder: string; status: string; search: string };
+  statuses: string[];
+  selectedBrand: { id: number; name: string };
+  folders: Array<{ name: string; description: string; icon: string; count: number }>;
+  assets: Array<{
+    id: number;
+    name: string;
+    folder: string;
+    type: string;
+    source: string;
+    status: string;
+    size: number;
+    createdAt?: string | null;
+  }>;
+  uploadForm: { name: string; folder: string; source: string };
+}
+
+export interface BrandRulesPageResponse {
+  page: { title: string; subtitle: string };
+  brands: Array<{ id: number; name: string; status: string; version: string; ruleCount: number }>;
+  selectedBrand: { id: number; name: string };
+  overview: Array<{ label: string; value: string | number; description: string }>;
+  designRules: Array<{ title: string; description: string }>;
+  layoutRules: Array<{ title: string; description: string }>;
+  components: Array<{ title: string; description: string }>;
+  promptTemplates: Array<{ title: string; description: string }>;
+  emptyState: string;
+}
+
+export interface ProductsPageResponse {
+  page: { title: string; subtitle: string };
+  products: Array<{
+    id: number;
+    name: string;
+    category: string;
+    sellingPointCount: number;
+    assetCount: number;
+    updatedAt: string;
+  }>;
+  selectedProduct: {
+    id: number;
+    name: string;
+    category: string;
+    summary: string;
+    brief: string;
+    designDirection: string;
+    sellingPoints: string[];
+    materials: string[];
+  };
+}
+
+export interface DesignTasksPageResponse {
+  page: { title: string; subtitle: string };
+  brands: string[];
+  taskTypes: string[];
+  statuses: string[];
+  filters: { brand: string; status: string; taskType: string; search: string };
+  metrics: { total: number; running: number; success: number; failed: number };
+  tasks: Array<{
+    taskId: string;
+    brand: string;
+    product: string;
+    taskType: string;
+    status: string;
+    createdAt?: string | null;
+    completedAt?: string | null;
+  }>;
+}
+
+export async function fetchDefaults(): Promise<DefaultsResponse> {
+  return fetchJson("/api/config/defaults");
+}
+
+export async function fetchDashboard(): Promise<DashboardResponse> {
+  return fetchJson("/api/pages/dashboard");
+}
+
+export async function fetchBrandAssetsPage(): Promise<BrandAssetsPageResponse> {
+  return fetchJson("/api/pages/brand-assets");
+}
+
+export async function fetchBrandAssetsPageWithFilters(filters: {
+  brandId?: number;
+  folder?: string;
+  status?: string;
+  search?: string;
+}): Promise<BrandAssetsPageResponse> {
+  const params = new URLSearchParams();
+  if (filters.brandId) params.set("brand_id", String(filters.brandId));
+  if (filters.folder) params.set("folder", filters.folder);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.search) params.set("search", filters.search);
+  const query = params.toString();
+  return fetchJson(`/api/pages/brand-assets${query ? `?${query}` : ""}`);
+}
+
+export async function fetchBrandRulesPage(): Promise<BrandRulesPageResponse> {
+  return fetchJson("/api/pages/brand-rules");
+}
+
+export async function fetchBrandRulesPageWithFilters(filters: {
+  brandId?: number;
+}): Promise<BrandRulesPageResponse> {
+  const params = new URLSearchParams();
+  if (filters.brandId) params.set("brand_id", String(filters.brandId));
+  const query = params.toString();
+  return fetchJson(`/api/pages/brand-rules${query ? `?${query}` : ""}`);
+}
+
+export async function fetchProductsPage(): Promise<ProductsPageResponse> {
+  return fetchJson("/api/pages/products");
+}
+
+export async function fetchDesignTasksPage(): Promise<DesignTasksPageResponse> {
+  return fetchJson("/api/pages/design-tasks");
+}
+
+export async function fetchDesignTasksPageWithFilters(filters: {
+  brand?: string;
+  status?: string;
+  taskType?: string;
+  search?: string;
+}): Promise<DesignTasksPageResponse> {
+  const params = new URLSearchParams();
+  if (filters.brand) params.set("brand", filters.brand);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.taskType) params.set("task_type", filters.taskType);
+  if (filters.search) params.set("search", filters.search);
+  const query = params.toString();
+  return fetchJson(`/api/pages/design-tasks${query ? `?${query}` : ""}`);
+}
+
+export async function uploadBrandAssets(input: {
+  brandId: number;
+  name: string;
+  folder: string;
+  source: string;
+  files: File[];
+}): Promise<{ created: Array<{ id: number; name: string }>; count: number }> {
+  const formData = new FormData();
+  formData.append("brand_id", String(input.brandId));
+  formData.append("name", input.name);
+  formData.append("folder", input.folder);
+  formData.append("source", input.source);
+  input.files.forEach((file) => formData.append("files", file));
+  const response = await fetch(`${API_BASE}/api/brand-assets/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `资产上传失败：${response.status}`);
   }
   return response.json();
 }
@@ -179,7 +364,7 @@ export async function cancelWorkflow(runId: string): Promise<void> {
 }
 
 export async function fetchWorkflowLogs(runId: string): Promise<WorkflowLogsResponse> {
-  const response = await fetch(`${API_BASE}/api/workflows/${runId}/logs`);
+  const response = await fetch(`${API_BASE}/api/workflows/${runId}/logs`, { cache: "no-store" });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `日志加载失败：${response.status}`);

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import database
 from .llm import LLMClient, LLMUnavailable
 from .models import StageResult, UploadedAsset, WorkflowRequest
 from .runtime import append_log, append_stage_result, reset_run, set_run_state
@@ -801,6 +802,10 @@ def run_pipeline(
     cancel_checker: Callable[[], bool] | None = None,
 ) -> tuple[list[StageResult], PipelineContext]:
     reset_run(run_id or "local")
+    try:
+        database.persist_run_started(run_id or "local", request, assets)
+    except Exception as exc:
+        print(f"[DB] persist_run_started failed: {exc}", flush=True)
     ctx = PipelineContext(
         request=request,
         assets=assets,

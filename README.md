@@ -41,11 +41,14 @@
 ```bash
 cd psd-agent/backend
 pip install -r requirements.txt
+export DATABASE_URL="mysql://mysql:mysql@127.0.0.1:3306/myprismadb?schema=public"
 export DASHSCOPE_API_KEY=你的Key   # 或 OPENAI_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
 
 默认文本模型为 `qwen-plus`、视觉模型为 `qwen-vl-max`（DashScope OpenAI 兼容），可在界面或配置文件改成任意 provider。
+
+也可以复制 `backend/.env.example` 为 `backend/.env`，后端会自动读取。后端启动时会根据 `DATABASE_URL` 自动创建 MySQL 表，用于持久化工作流任务、上传资产、阶段结果、运行日志、输出产物索引、品牌和品牌资产。产物文件仍写入 `backend/runs/<run_id>/outputs`，数据库保存可检索的结构化索引和完整设计规格。
 
 视觉理解阶段会把上传的商品图压缩后送入多模态模型（`enable_vision` 控制开关，`max_vision_images` 控制读图数量）。
 图片压缩依赖 Pillow，已包含在 `requirements.txt`；若未安装则自动回退为文本推断。

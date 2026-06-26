@@ -5,11 +5,12 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
+from . import database
 from .defaults import load_workflow_defaults
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
@@ -30,9 +31,15 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def startup() -> None:
+    database.init_db()
+    database.ensure_seed_data()
+
+
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    return {"status": "ok", "database": database.database_health()}
 
 
 @app.post("/api/workflows/{run_id}/cancel")
@@ -50,24 +57,104 @@ def workflow_logs(run_id: str) -> dict[str, object]:
 
 @app.get("/api/config/defaults")
 def config_defaults() -> dict[str, object]:
-    defaults = load_workflow_defaults()
+    defaults = database.get_workflow_defaults_data()
+    stages = database.get_workflow_stages_data()
+    if defaults is None or stages is None:
+        database.ensure_seed_data()
+        defaults = database.get_workflow_defaults_data() or load_workflow_defaults()
+        stages = database.get_workflow_stages_data() or database.DEFAULT_WORKFLOW_STAGES
     return {
         "payload": defaults,
         "prompts": defaults["prompts"],
         "workflowModes": ["smart_recommend", "strict_brand"],
         "outputTypes": ["detail_page", "figma_page", "psd_file", "main_image", "banner"],
-        "stages": [
-            {"id": "product_understanding", "title": "商品理解 Agent", "icon": "eye"},
-            {"id": "product_brief", "title": "Product Brief", "icon": "layers"},
-            {"id": "brand_knowledge", "title": "品牌知识库 / 规则版本", "icon": "library"},
-            {"id": "page_planner", "title": "页面规划 Agent", "icon": "palette"},
-            {"id": "layout_engine", "title": "Layout Engine", "icon": "grid"},
-            {"id": "copy", "title": "文案 Agent", "icon": "type"},
-            {"id": "figma_psd", "title": "Figma / PSD 生成 Agent", "icon": "file-image"},
-            {"id": "design_score", "title": "Design Score", "icon": "check-circle"},
-            {"id": "output_review", "title": "输出、审核与反馈", "icon": "check-circle"},
-        ],
+        "stages": stages,
     }
+
+
+@app.get("/api/pages/dashboard")
+def dashboard_page() -> dict[str, object]:
+    data = database.get_dashboard_data()
+    if data is None:
+        database.ensure_seed_data()
+        data = database.get_dashboard_data()
+    if data is None:
+        raise HTTPException(status_code=404, detail="dashboard data not found")
+    return data
+
+
+@app.get("/api/pages/brand-assets")
+def brand_assets_page(
+    brand_id: int | None = Query(default=None),
+    folder: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+) -> dict[str, object]:
+    data = database.get_brand_assets_page_data(
+        brand_id=brand_id,
+        folder=folder,
+        status=status,
+        search=search,
+    )
+    if data is None:
+        database.ensure_seed_data()
+        data = database.get_brand_assets_page_data(
+            brand_id=brand_id,
+            folder=folder,
+            status=status,
+            search=search,
+        )
+    if data is None:
+        raise HTTPException(status_code=404, detail="brand assets data not found")
+    return data
+
+
+@app.get("/api/pages/brand-rules")
+def brand_rules_page(brand_id: int | None = Query(default=None)) -> dict[str, object]:
+    data = database.get_brand_rules_page_data(brand_id=brand_id)
+    if data is None:
+        database.ensure_seed_data()
+        data = database.get_brand_rules_page_data(brand_id=brand_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="brand rules data not found")
+    return data
+
+
+@app.get("/api/pages/products")
+def products_page() -> dict[str, object]:
+    data = database.get_products_data()
+    if data is None:
+        database.ensure_seed_data()
+        data = database.get_products_data()
+    if data is None:
+        raise HTTPException(status_code=404, detail="products data not found")
+    return data
+
+
+@app.get("/api/pages/design-tasks")
+def design_tasks_page(
+    brand: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    task_type: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+) -> dict[str, object]:
+    data = database.get_design_tasks_page_data(
+        brand=brand,
+        status=status,
+        task_type=task_type,
+        search=search,
+    )
+    if data is None:
+        database.ensure_seed_data()
+        data = database.get_design_tasks_page_data(
+            brand=brand,
+            status=status,
+            task_type=task_type,
+            search=search,
+        )
+    if data is None:
+        raise HTTPException(status_code=404, detail="design tasks data not found")
+    return data
 
 
 def _safe_filename(name: str) -> str:
@@ -153,6 +240,31 @@ def _merge_payload(incoming: dict) -> dict:
     return data
 
 
+@app.post("/api/brand-assets/upload")
+async def upload_brand_assets(
+    brand_id: int = Form(...),
+    name: str = Form(default=""),
+    folder: str = Form(...),
+    source: str = Form(default=""),
+    files: list[UploadFile] = File(default=[]),
+) -> dict[str, object]:
+    if not files:
+        raise HTTPException(status_code=422, detail="请至少上传一个文件")
+    media_dir = APP_ROOT / "media" / "brand-assets" / str(brand_id)
+    saved_assets = await _save_assets(files, media_dir, bucket_override="brand_asset")
+    try:
+        created = database.create_brand_assets(
+            brand_id=brand_id,
+            name=name,
+            folder=folder,
+            source=source,
+            files=[asset.model_dump() for asset in saved_assets],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"created": created, "count": len(created)}
+
+
 @app.post("/api/workflows/generate", response_model=WorkflowResult)
 async def generate_workflow(
     payload: str = Form(...),
@@ -213,11 +325,27 @@ async def generate_workflow(
 
     used_model = any(stage.used_model for stage in stages)
     agent_report = "\n\n".join(ctx.report_parts)
+    status = "completed" if used_model else "fallback_completed"
+    summary = "BrandOS 设计任务已完成：含品牌规则分层、页面结构、SVG 预览、Figma/PSD 结构说明、评分与反馈清单。"
+    try:
+        database.persist_run_completed(
+            run_id=run_id,
+            status=status,
+            summary=summary,
+            used_deepagents=used_model,
+            agent_report=agent_report,
+            design_spec=spec,
+            artifact_paths=artifact_paths,
+            output_dir=str(output_dir),
+            warnings=ctx.warnings,
+        )
+    except Exception as exc:
+        append_log(run_id, "Database", f"MySQL 持久化最终结果失败：{exc}")
 
     return WorkflowResult(
         run_id=run_id,
-        status="completed" if used_model else "fallback_completed",
-        summary="BrandOS 设计任务已完成：含品牌规则分层、页面结构、SVG 预览、Figma/PSD 结构说明、评分与反馈清单。",
+        status=status,
+        summary=summary,
         used_deepagents=used_model,
         stages=stages,
         agent_report=agent_report,

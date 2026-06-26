@@ -1,0 +1,101 @@
+{
+  "id": "535a90bc-e27e-4fde-aa39-9f39177b0755",
+  "created_at": "2026-06-26T16:57:16Z",
+  "updated_at": "2026-06-26T16:57:17Z",
+  "brand_id": "brand_default",
+  "rule_version_id": "rule_8c40fce30d21",
+  "project_name": "BrandOS 商品详情页设计任务",
+  "product_name": "电脑包",
+  "status": "running",
+  "workflow_mode": "smart_recommend",
+  "output_types": [
+    "detail_page",
+    "figma_page",
+    "psd_file"
+  ],
+  "input_payload": {
+    "project_name": "BrandOS 商品详情页设计任务",
+    "brand_name": "ANKORAU × ANAR FC",
+    "brand_id": "brand_default",
+    "rule_version_id": "rule_8c40fce30d21",
+    "product_name": "电脑包",
+    "product_brief": "商品类型：电脑包\n核心卖点：轻量通勤、多分区收纳、防泼水、简洁商务风格\n使用场景：办公、通勤、短途旅行",
+    "brand_guidelines": "整体视觉保持简洁、克制、商务质感。\n页面宽度 790 像素，高度不限。\n标题字体 方正兰亭特黑简体 28 号，段落字体 方正兰亭黑简体 10 号，英文字体 AKR Sans。\n颜色以品牌黑、灰、白和低饱和浅色背景为主。",
+    "reference_notes": "参考图作为 Asset Memory 进入品牌知识库，仅辅助生成，不直接覆盖 Core Rule。",
+    "workflow_mode": "smart_recommend",
+    "output_types": [
+      "detail_page",
+      "figma_page",
+      "psd_file"
+    ],
+    "model_config": {
+      "provider": "openai",
+      "model": "qwen3.7-plus",
+      "vision_model": "qwen-vl-max",
+      "api_key": "sk-b2c5f64593b245cbb5da8860faba06e3",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "temperature": 0.4,
+      "max_tokens": 4096,
+      "enable_deepagents": true,
+      "enable_vision": true,
+      "max_vision_images": 4
+    },
+    "typography": {
+      "title_font": "方正兰亭特黑简体",
+      "subtitle_font": "方正兰亭黑简体",
+      "body_font": "方正兰亭黑简体",
+      "english_font": "AKR Sans",
+      "title_size": 28,
+      "subtitle_size": 18,
+      "body_size": 10,
+      "line_height": 1.5,
+      "letter_spacing": 0.0,
+      "font_weight": "Medium",
+      "text_color": "#1f2937",
+      "lock_brand_typography": true
+    },
+    "layout": {
+      "canvas_width": 790,
+      "module_count": 7,
+      "hero_height": 1000,
+      "module_height": 820,
+      "visual_style": "简洁商务 / 浅色质感 / 接近参考图",
+      "background_color": "#eef1f4",
+      "accent_color": "#1f2937",
+      "image_ratio": 0.62,
+      "spacing_scale": 1.0
+    },
+    "prompts": {
+      "system_prompt": "你是 BrandOS AI 电商设计平台的主控 Agent。\n你的目标不是直接出图，而是让 AI 理解品牌：先沉淀品牌知识库与规则版本，再生成结构化页面中间结果，最后输出可继续编辑的 Figma 页面，并保留 PSD 兼容说明。\n所有结论都必须可追溯、可解释、可被设计师审核，不允许自动覆盖品牌核心规则。",
+      "vision_agent_prompt": "你是商品理解 Agent。\n请结合商品图、brief 和上传资料，提炼 Product Brief：商品类型、目标用户、核心卖点、材质/参数、适用场景、页面表达重点。\n如果无法真正读取像素，请基于文件名和 brief 谨慎推断，不要编造不存在的细节。",
+      "structured_agent_prompt": "你是 Product Brief 结构化 Agent。\n将商品理解结果与 brief 合并成后续页面规划可消费的结构：\nbrand, product, audience, selling_points, specifications, scenarios, design_focus。\n卖点和参数必须来自 brief 或视觉信息，不得凭空增加。",
+      "brand_rag_agent_prompt": "你是品牌知识库与规则版本 Agent。\n请根据品牌规范、参考案例、字体文件和界面配置，生成 Brand Design System 摘要：\nCore Rule、Derived Rule、Asset Memory 三层规则，包含权重、规则版本、漂移风险、布局规则、组件模式和 Prompt 模板摘要。\nCore Rule 不得自动修改；新资产只能形成变更建议，等待人工审批发布。",
+      "design_agent_prompt": "你是页面规划 Agent。\n基于 Product Brief 与 Brand Design System，输出受模板约束的页面信息架构。\n详情页必须优先使用 Hero / Feature / Technology / Scenario / Parameter / Brand Story / CTA 等标准模块，Agent 的职责是在模板内组织内容，而不是自由创造任意结构。\n同时输出整体视觉方向、图片资产需求、品牌约束与风险点。",
+      "layout_agent_prompt": "你是 Layout Engine Agent。\n将页面结构转成可渲染、可映射到 Figma 的布局 JSON：模块名、图层组名、布局类型、高度、角色、用图、组件元素。\n必须遵守画布宽度、模块数量、品牌字体、配色、栅格和留白规则，并保留 PSD 兼容图层命名。",
+      "copy_agent_prompt": "你是详情页文案 Agent。\n只基于 brief 和已知信息为每个模块生成文案：主标题、副标题、短说明、要点。\n标题短、清楚、有层级；不夸大功能，不使用绝对化或平台风险词。",
+      "psd_agent_prompt": "你是 Figma / PSD 生成 Agent。\n将布局与文案转成设计稿生产说明：优先输出 Figma 页面结构，包括文本图层、图片图层、组件图层和结构化命名；\n同时保留 PSD 兼容图层树，方便 Photoshop 二次编辑。"
+    }
+  },
+  "referenced_asset_ids": [],
+  "asset_names": [],
+  "run_started_at": "2026-06-26T16:57:16Z",
+  "run_finished_at": null,
+  "current_stage": "product_understanding",
+  "current_stage_title": "商品理解 Agent",
+  "current_stage_icon": "eye",
+  "warnings": [],
+  "artifacts": {
+    "output_dir": null,
+    "preview_svg": null,
+    "design_spec": null,
+    "photoshop_jsx": null,
+    "readme": null
+  },
+  "stage_results": [],
+  "logs": [
+    "[00:57:16][Workflow] 工作流启动\n{\n  \"project_name\": \"BrandOS 商品详情页设计任务\",\n  \"brand_name\": \"ANKORAU × ANAR FC\",\n  \"product_name\": \"电脑包\",\n  \"assets\": []\n}",
+    "[00:57:16][Workflow] 开始阶段：商品理解 Agent (product_understanding)",
+    "[00:57:16][LLM] 初始化模型：provider=openai, model=qwen3.7-plus",
+    "[00:57:17][LLM] 发送给文本模型的信息\n[\n  {\n    \"role\": \"system\",\n    \"content\": \"你是商品理解 Agent。\\n请结合商品图、brief 和上传资料，提炼 Product Brief：商品类型、目标用户、核心卖点、材质/参数、适用场景、页面表达重点。\\n如果无法真正读取像素，请基于文件名和 brief 谨慎推断，不要编造不存在的细节。\\n\\n请只输出一个合法 JSON 对象，不要包含解释文字、注释或 markdown 代码块标记。\"\n  },\n  {\n    \"role\": \"user\",\n    \"content\": \"商品名称：电脑包\\n品牌：ANKORAU × ANAR FC\\n商品图文件名：[]\\nbrief 文本：\\n商品类型：电脑包\\n核心卖点：轻量通勤、多分区收纳、防泼水、简洁商务风格\\n使用场景：办公、通勤、短途旅行\\n\\n请输出 Product Brief 基础信息，字段：product_type, target_audience, main_color, material, key_features(数组), scenarios(数组), usable_images(对象，含 hero_image、detail_images 数组、scene_images 数组)。\"\n  }\n]"
+  ]
+}

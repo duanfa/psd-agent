@@ -1,0 +1,165 @@
+{
+  "id": "rule_f4a929eb19df",
+  "created_at": "2026-06-26T03:21:09Z",
+  "updated_at": "2026-06-26T03:21:13Z",
+  "brand_id": "brand_default",
+  "version_number": 3,
+  "version_label": "Brand Rule V3.0",
+  "status": "rolled_back",
+  "summary": "基于已批准品牌资产生成候选版本。",
+  "change_reason": "BrandOS MVP 平台发起的品牌训练。",
+  "source_asset_ids": [],
+  "brand_profile": {
+    "core_rule": {
+      "brand_name": "ANKORAU × ANAR FC",
+      "brand_guidelines": "整体视觉保持简洁、克制、商务质感。\n页面宽度 790 像素，高度不限。\n标题字体 方正兰亭特黑简体 28 号，段落字体 方正兰亭黑简体 10 号，英文字体 AKR Sans。\n颜色以品牌黑、灰、白和低饱和浅色背景为主。",
+      "primary_color": "#1f2937",
+      "background_color": "#eef1f4",
+      "typography": {
+        "title_font": "方正兰亭特黑简体",
+        "subtitle_font": "方正兰亭黑简体",
+        "body_font": "方正兰亭黑简体",
+        "english_font": "AKR Sans",
+        "title_size": 28,
+        "subtitle_size": 18,
+        "body_size": 10,
+        "line_height": 1.5,
+        "letter_spacing": 0,
+        "font_weight": "Medium",
+        "text_color": "#1f2937",
+        "lock_brand_typography": true
+      },
+      "selected_asset_count": 0
+    },
+    "derived_rule": {
+      "page_type": "detail_page",
+      "module_count": 7,
+      "visual_style": "简洁商务 / 浅色质感 / 接近参考图",
+      "output_types": [
+        "detail_page",
+        "figma_page",
+        "psd_file"
+      ],
+      "training_asset_names": []
+    },
+    "asset_memory": {
+      "approved_assets": [],
+      "approved_asset_ids": []
+    },
+    "rule_weights": {
+      "core_rule": 0.7,
+      "derived_rule": 0.2,
+      "asset_memory": 0.1
+    },
+    "drift_risks": [
+      "请人工确认字体、颜色和模块模板差异后再发布。",
+      "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+    ]
+  },
+  "prompt_overrides": {},
+  "diff_summary": {
+    "core_rule": {
+      "before": {
+        "brand_name": "ANKORAU × ANAR FC",
+        "brand_guidelines": "整体视觉保持简洁、克制、商务质感。\n页面宽度 790 像素，高度不限。\n标题字体 方正兰亭特黑简体 28 号，段落字体 方正兰亭黑简体 10 号，英文字体 AKR Sans。\n颜色以品牌黑、灰、白和低饱和浅色背景为主。",
+        "primary_color": "#1f2937",
+        "background_color": "#eef1f4",
+        "typography": {
+          "title_font": "方正兰亭特黑简体",
+          "subtitle_font": "方正兰亭黑简体",
+          "body_font": "方正兰亭黑简体",
+          "english_font": "AKR Sans",
+          "title_size": 28,
+          "subtitle_size": 18,
+          "body_size": 10,
+          "line_height": 1.5,
+          "letter_spacing": 0,
+          "font_weight": "Medium",
+          "text_color": "#1f2937",
+          "lock_brand_typography": true
+        }
+      },
+      "after": {
+        "brand_name": "ANKORAU × ANAR FC",
+        "brand_guidelines": "整体视觉保持简洁、克制、商务质感。\n页面宽度 790 像素，高度不限。\n标题字体 方正兰亭特黑简体 28 号，段落字体 方正兰亭黑简体 10 号，英文字体 AKR Sans。\n颜色以品牌黑、灰、白和低饱和浅色背景为主。",
+        "primary_color": "#1f2937",
+        "background_color": "#eef1f4",
+        "typography": {
+          "title_font": "方正兰亭特黑简体",
+          "subtitle_font": "方正兰亭黑简体",
+          "body_font": "方正兰亭黑简体",
+          "english_font": "AKR Sans",
+          "title_size": 28,
+          "subtitle_size": 18,
+          "body_size": 10,
+          "line_height": 1.5,
+          "letter_spacing": 0,
+          "font_weight": "Medium",
+          "text_color": "#1f2937",
+          "lock_brand_typography": true
+        },
+        "selected_asset_count": 0
+      }
+    },
+    "derived_rule": {
+      "before": {
+        "page_type": "detail_page",
+        "module_count": 7,
+        "visual_style": "简洁商务 / 浅色质感 / 接近参考图",
+        "output_types": [
+          "detail_page",
+          "figma_page",
+          "psd_file"
+        ]
+      },
+      "after": {
+        "page_type": "detail_page",
+        "module_count": 7,
+        "visual_style": "简洁商务 / 浅色质感 / 接近参考图",
+        "output_types": [
+          "detail_page",
+          "figma_page",
+          "psd_file"
+        ],
+        "training_asset_names": []
+      }
+    },
+    "asset_memory": {
+      "before": {
+        "reference_notes": "参考图作为 Asset Memory 进入品牌知识库，仅辅助生成，不直接覆盖 Core Rule。",
+        "reference_images": []
+      },
+      "after": {
+        "approved_assets": [],
+        "approved_asset_ids": []
+      }
+    },
+    "rule_weights": {
+      "before": {
+        "core_rule": 0.7,
+        "derived_rule": 0.2,
+        "asset_memory": 0.1
+      },
+      "after": {
+        "core_rule": 0.7,
+        "derived_rule": 0.2,
+        "asset_memory": 0.1
+      }
+    },
+    "drift_risks": {
+      "before": [
+        "默认品牌空间仅用于本地演示，请通过品牌训练生成正式版本。"
+      ],
+      "after": [
+        "请人工确认字体、颜色和模块模板差异后再发布。",
+        "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+      ]
+    }
+  },
+  "drift_risks": [
+    "请人工确认字体、颜色和模块模板差异后再发布。",
+    "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+  ],
+  "published_at": null,
+  "rolled_back_from_version_id": null
+}

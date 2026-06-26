@@ -1,0 +1,669 @@
+{
+  "id": "eecaf0a4-92dc-475c-8b65-98d2c683173c",
+  "created_at": "2026-06-26T04:50:06Z",
+  "updated_at": "2026-06-26T04:50:07Z",
+  "brand_id": "brand_default",
+  "rule_version_id": "rule_8c40fce30d21",
+  "project_name": "BrandOS 商品详情页设计任务",
+  "product_name": "电脑包",
+  "status": "fallback_completed",
+  "workflow_mode": "smart_recommend",
+  "output_types": [
+    "detail_page",
+    "figma_page",
+    "psd_file"
+  ],
+  "input_payload": {
+    "project_name": "BrandOS 商品详情页设计任务",
+    "brand_name": "ANKORAU × ANAR FC",
+    "brand_id": "brand_default",
+    "rule_version_id": "rule_8c40fce30d21",
+    "product_name": "电脑包",
+    "product_brief": "商品类型：电脑包\n核心卖点：轻量通勤、多分区收纳、防泼水、简洁商务风格\n使用场景：办公、通勤、短途旅行",
+    "brand_guidelines": "整体视觉保持简洁、克制、商务质感。\n页面宽度 790 像素，高度不限。\n标题字体 方正兰亭特黑简体 28 号，段落字体 方正兰亭黑简体 10 号，英文字体 AKR Sans。\n颜色以品牌黑、灰、白和低饱和浅色背景为主。",
+    "reference_notes": "参考图作为 Asset Memory 进入品牌知识库，仅辅助生成，不直接覆盖 Core Rule。",
+    "workflow_mode": "smart_recommend",
+    "output_types": [
+      "detail_page",
+      "figma_page",
+      "psd_file"
+    ],
+    "model_config": {
+      "provider": "openai",
+      "model": "qwen-plus",
+      "vision_model": "qwen-vl-max",
+      "api_key": "",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "temperature": 0.4,
+      "max_tokens": 4096,
+      "enable_deepagents": true,
+      "enable_vision": true,
+      "max_vision_images": 4
+    },
+    "typography": {
+      "title_font": "方正兰亭特黑简体",
+      "subtitle_font": "方正兰亭黑简体",
+      "body_font": "方正兰亭黑简体",
+      "english_font": "AKR Sans",
+      "title_size": 28,
+      "subtitle_size": 18,
+      "body_size": 10,
+      "line_height": 1.5,
+      "letter_spacing": 0.0,
+      "font_weight": "Medium",
+      "text_color": "#1f2937",
+      "lock_brand_typography": true
+    },
+    "layout": {
+      "canvas_width": 790,
+      "module_count": 7,
+      "hero_height": 1000,
+      "module_height": 820,
+      "visual_style": "简洁商务 / 浅色质感 / 接近参考图",
+      "background_color": "#eef1f4",
+      "accent_color": "#1f2937",
+      "image_ratio": 0.62,
+      "spacing_scale": 1.0
+    },
+    "prompts": {
+      "system_prompt": "你是 BrandOS AI 电商设计平台的主控 Agent。\n你的目标不是直接出图，而是让 AI 理解品牌：先沉淀品牌知识库与规则版本，再生成结构化页面中间结果，最后输出可继续编辑的 Figma 页面，并保留 PSD 兼容说明。\n所有结论都必须可追溯、可解释、可被设计师审核，不允许自动覆盖品牌核心规则。",
+      "vision_agent_prompt": "你是商品理解 Agent。\n请结合商品图、brief 和上传资料，提炼 Product Brief：商品类型、目标用户、核心卖点、材质/参数、适用场景、页面表达重点。\n如果无法真正读取像素，请基于文件名和 brief 谨慎推断，不要编造不存在的细节。",
+      "structured_agent_prompt": "你是 Product Brief 结构化 Agent。\n将商品理解结果与 brief 合并成后续页面规划可消费的结构：\nbrand, product, audience, selling_points, specifications, scenarios, design_focus。\n卖点和参数必须来自 brief 或视觉信息，不得凭空增加。",
+      "brand_rag_agent_prompt": "你是品牌知识库与规则版本 Agent。\n请根据品牌规范、参考案例、字体文件和界面配置，生成 Brand Design System 摘要：\nCore Rule、Derived Rule、Asset Memory 三层规则，包含权重、规则版本、漂移风险、布局规则、组件模式和 Prompt 模板摘要。\nCore Rule 不得自动修改；新资产只能形成变更建议，等待人工审批发布。",
+      "design_agent_prompt": "你是页面规划 Agent。\n基于 Product Brief 与 Brand Design System，输出受模板约束的页面信息架构。\n详情页必须优先使用 Hero / Feature / Technology / Scenario / Parameter / Brand Story / CTA 等标准模块，Agent 的职责是在模板内组织内容，而不是自由创造任意结构。\n同时输出整体视觉方向、图片资产需求、品牌约束与风险点。",
+      "layout_agent_prompt": "你是 Layout Engine Agent。\n将页面结构转成可渲染、可映射到 Figma 的布局 JSON：模块名、图层组名、布局类型、高度、角色、用图、组件元素。\n必须遵守画布宽度、模块数量、品牌字体、配色、栅格和留白规则，并保留 PSD 兼容图层命名。",
+      "copy_agent_prompt": "你是详情页文案 Agent。\n只基于 brief 和已知信息为每个模块生成文案：主标题、副标题、短说明、要点。\n标题短、清楚、有层级；不夸大功能，不使用绝对化或平台风险词。",
+      "psd_agent_prompt": "你是 Figma / PSD 生成 Agent。\n将布局与文案转成设计稿生产说明：优先输出 Figma 页面结构，包括文本图层、图片图层、组件图层和结构化命名；\n同时保留 PSD 兼容图层树，方便 Photoshop 二次编辑。"
+    }
+  },
+  "referenced_asset_ids": [],
+  "asset_names": [],
+  "run_started_at": "2026-06-26T04:50:06Z",
+  "run_finished_at": "2026-06-26T04:50:07Z",
+  "current_stage": null,
+  "current_stage_title": null,
+  "current_stage_icon": null,
+  "warnings": [
+    "[product_understanding] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[product_brief] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[brand_knowledge] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[page_planner] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[layout_engine] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[copy] 未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[figma_psd] 未配置模型 API Key（请在界面填写或设置环境变量）"
+  ],
+  "artifacts": {
+    "output_dir": "D:\\Code\\psd-agent-main\\backend\\runs\\eecaf0a4-92dc-475c-8b65-98d2c683173c\\outputs",
+    "preview_svg": "D:\\Code\\psd-agent-main\\backend\\runs\\eecaf0a4-92dc-475c-8b65-98d2c683173c\\outputs\\preview.svg",
+    "design_spec": "D:\\Code\\psd-agent-main\\backend\\runs\\eecaf0a4-92dc-475c-8b65-98d2c683173c\\outputs\\design_spec.json",
+    "photoshop_jsx": "D:\\Code\\psd-agent-main\\backend\\runs\\eecaf0a4-92dc-475c-8b65-98d2c683173c\\outputs\\create_detail_page.jsx",
+    "readme": "D:\\Code\\psd-agent-main\\backend\\runs\\eecaf0a4-92dc-475c-8b65-98d2c683173c\\outputs\\README.md"
+  },
+  "stage_results": [
+    {
+      "id": "product_understanding",
+      "title": "商品理解 Agent",
+      "icon": "eye",
+      "status": "fallback",
+      "summary": "按文件名/brief 规则推断：电脑包，主色 以参考图为准（浅蓝 / 低饱和），关键特征：轻量通勤、多分区收纳、防泼水、简洁商务风格。",
+      "detail": "{\n  \"product_type\": \"电脑包\",\n  \"target_audience\": \"注重品质、效率与品牌一致性的电商消费者（待人工确认）\",\n  \"main_color\": \"以参考图为准（浅蓝 / 低饱和）\",\n  \"material\": \"尼龙 / 防泼水面料（待人工确认）\",\n  \"key_features\": [\n    \"轻量通勤\",\n    \"多分区收纳\",\n    \"防泼水\",\n    \"简洁商务风格\"\n  ],\n  \"scenarios\": [\n    \"办公\",\n    \"通勤\",\n    \"短途旅行\"\n  ],\n  \"usable_images\": {\n    \"hero_image\": \"（待上传主视觉图）\",\n    \"detail_images\": [],\n    \"scene_images\": []\n  }\n}",
+      "data": {
+        "product_type": "电脑包",
+        "target_audience": "注重品质、效率与品牌一致性的电商消费者（待人工确认）",
+        "main_color": "以参考图为准（浅蓝 / 低饱和）",
+        "material": "尼龙 / 防泼水面料（待人工确认）",
+        "key_features": [
+          "轻量通勤",
+          "多分区收纳",
+          "防泼水",
+          "简洁商务风格"
+        ],
+        "scenarios": [
+          "办公",
+          "通勤",
+          "短途旅行"
+        ],
+        "usable_images": {
+          "hero_image": "（待上传主视觉图）",
+          "detail_images": [],
+          "scene_images": []
+        }
+      },
+      "used_model": false,
+      "elapsed_ms": 620
+    },
+    {
+      "id": "product_brief",
+      "title": "Product Brief",
+      "icon": "layers",
+      "status": "fallback",
+      "summary": "统一商品结构已生成，核心卖点：轻量通勤、多分区收纳、防泼水、简洁商务风格。",
+      "detail": "{\n  \"brand\": \"ANKORAU × ANAR FC\",\n  \"product\": \"电脑包\",\n  \"audience\": \"注重品质、效率与品牌一致性的电商消费者（待人工确认）\",\n  \"selling_points\": [\n    \"轻量通勤\",\n    \"多分区收纳\",\n    \"防泼水\",\n    \"简洁商务风格\"\n  ],\n  \"specifications\": {\n    \"size\": \"根据 brief 提取\",\n    \"weight\": \"根据 brief 提取\",\n    \"material\": \"尼龙 / 防泼水面料（待人工确认）\"\n  },\n  \"scenarios\": [\n    \"办公\",\n    \"通勤\",\n    \"短途旅行\"\n  ],\n  \"design_focus\": \"将商品卖点转译为标准详情页模块，保持品牌一致性与可编辑性。\"\n}",
+      "data": {
+        "brand": "ANKORAU × ANAR FC",
+        "product": "电脑包",
+        "audience": "注重品质、效率与品牌一致性的电商消费者（待人工确认）",
+        "selling_points": [
+          "轻量通勤",
+          "多分区收纳",
+          "防泼水",
+          "简洁商务风格"
+        ],
+        "specifications": {
+          "size": "根据 brief 提取",
+          "weight": "根据 brief 提取",
+          "material": "尼龙 / 防泼水面料（待人工确认）"
+        },
+        "scenarios": [
+          "办公",
+          "通勤",
+          "短途旅行"
+        ],
+        "design_focus": "将商品卖点转译为标准详情页模块，保持品牌一致性与可编辑性。"
+      },
+      "used_model": false,
+      "elapsed_ms": 48
+    },
+    {
+      "id": "brand_knowledge",
+      "title": "品牌知识库 / 规则版本",
+      "icon": "library",
+      "status": "fallback",
+      "summary": "规则版本：Brand Rule V4.0；Core/Derived/Asset 权重 {'core_rule': 0.7, 'derived_rule': 0.2, 'asset_memory': 0.1}；主色 #1f2937；字体 标题/方正兰亭特黑简体 正文/方正兰亭黑简体。",
+      "detail": "{\n  \"core_rule\": {\n    \"brand_name\": \"ANKORAU × ANAR FC\",\n    \"positioning\": \"企业级品牌设计操作系统中的当前品牌空间\",\n    \"tone\": \"简洁商务 / 浅色质感 / 接近参考图\",\n    \"primary_color\": \"#1f2937\",\n    \"typography_locked\": true\n  },\n  \"derived_rule\": {\n    \"page_type\": \"商品详情页\",\n    \"module_template\": [\n      \"Hero\",\n      \"Feature\",\n      \"Scenario\",\n      \"Parameter\",\n      \"Brand Story\",\n      \"CTA\"\n    ],\n    \"editable_scope\": \"允许页面层模块、文案和图片策略随任务调整，但受 Core Rule 约束。\"\n  },\n  \"asset_memory\": {\n    \"role\": \"仅作为参考案例，不直接修改核心品牌规则\",\n    \"reference_notes\": \"参考图作为 Asset Memory 进入品牌知识库，仅辅助生成，不直接覆盖 Core Rule。\",\n    \"reference_images\": [],\n    \"asset_names\": []\n  },\n  \"rule_weights\": {\n    \"core_rule\": 0.7,\n    \"derived_rule\": 0.2,\n    \"asset_memory\": 0.1\n  },\n  \"drift_risks\": [\n    \"新上传资产默认进入训练池，不自动覆盖当前生效规则\"\n  ],\n  \"version\": \"Brand Rule V4.0\",\n  \"rule_status\": \"draft_pending_approval\",\n  \"brand_style\": \"简洁商务 / 浅色质感 / 接近参考图\",\n  \"primary_color\": \"#1f2937\",\n  \"secondary_colors\": [\n    \"#eef1f4\",\n    \"#ffffff\"\n  ],\n  \"fonts\": {\n    \"title\": \"方正兰亭特黑简体\",\n    \"body\": \"方正兰亭黑简体\",\n    \"english\": \"AKR Sans\"\n  },\n  \"layout_rules\": [\n    \"页面宽度 790px，高度不限\",\n    \"标题 方正兰亭特黑简体 28号\",\n    \"正文 方正兰亭黑简体 10号\",\n    \"英文 AKR Sans\",\n    \"先生成结构化页面 Layout JSON，再映射到 Figma / PSD 输出\"\n  ],\n  \"component_patterns\": [\n    \"Hero\",\n    \"Feature\",\n    \"Technology\",\n    \"Scenario\",\n    \"Parameter\",\n    \"Brand Story\",\n    \"CTA\"\n  ],\n  \"prompt_templates\": [\n    \"详情页页面规划\",\n    \"场景图生成\",\n    \"局部模块重生成\",\n    \"设计评分\"\n  ],\n  \"module_order\": [\n    \"Hero\",\n    \"Feature\",\n    \"Scenario\",\n    \"Parameter\",\n    \"Brand Story\",\n    \"CTA\"\n  ]\n}",
+      "data": {
+        "core_rule": {
+          "brand_name": "ANKORAU × ANAR FC",
+          "positioning": "企业级品牌设计操作系统中的当前品牌空间",
+          "tone": "简洁商务 / 浅色质感 / 接近参考图",
+          "primary_color": "#1f2937",
+          "typography_locked": true
+        },
+        "derived_rule": {
+          "page_type": "商品详情页",
+          "module_template": [
+            "Hero",
+            "Feature",
+            "Scenario",
+            "Parameter",
+            "Brand Story",
+            "CTA"
+          ],
+          "editable_scope": "允许页面层模块、文案和图片策略随任务调整，但受 Core Rule 约束。"
+        },
+        "asset_memory": {
+          "role": "仅作为参考案例，不直接修改核心品牌规则",
+          "reference_notes": "参考图作为 Asset Memory 进入品牌知识库，仅辅助生成，不直接覆盖 Core Rule。",
+          "reference_images": [],
+          "asset_names": []
+        },
+        "rule_weights": {
+          "core_rule": 0.7,
+          "derived_rule": 0.2,
+          "asset_memory": 0.1
+        },
+        "drift_risks": [
+          "新上传资产默认进入训练池，不自动覆盖当前生效规则"
+        ],
+        "version": "Brand Rule V4.0",
+        "rule_status": "draft_pending_approval",
+        "brand_style": "简洁商务 / 浅色质感 / 接近参考图",
+        "primary_color": "#1f2937",
+        "secondary_colors": [
+          "#eef1f4",
+          "#ffffff"
+        ],
+        "fonts": {
+          "title": "方正兰亭特黑简体",
+          "body": "方正兰亭黑简体",
+          "english": "AKR Sans"
+        },
+        "layout_rules": [
+          "页面宽度 790px，高度不限",
+          "标题 方正兰亭特黑简体 28号",
+          "正文 方正兰亭黑简体 10号",
+          "英文 AKR Sans",
+          "先生成结构化页面 Layout JSON，再映射到 Figma / PSD 输出"
+        ],
+        "component_patterns": [
+          "Hero",
+          "Feature",
+          "Technology",
+          "Scenario",
+          "Parameter",
+          "Brand Story",
+          "CTA"
+        ],
+        "prompt_templates": [
+          "详情页页面规划",
+          "场景图生成",
+          "局部模块重生成",
+          "设计评分"
+        ],
+        "module_order": [
+          "Hero",
+          "Feature",
+          "Scenario",
+          "Parameter",
+          "Brand Story",
+          "CTA"
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 57
+    },
+    {
+      "id": "page_planner",
+      "title": "页面规划 Agent",
+      "icon": "palette",
+      "status": "fallback",
+      "summary": "对齐参考图：浅色背景 + 大图展示 + 简洁文字层级，突出商品质感与通勤属性。",
+      "detail": "{\n  \"direction\": \"对齐参考图：浅色背景 + 大图展示 + 简洁文字层级，突出商品质感与通勤属性。\",\n  \"page_template\": [\n    \"Hero\",\n    \"Feature\",\n    \"Scenario\",\n    \"Parameter\",\n    \"Brand Story\",\n    \"CTA\"\n  ],\n  \"information_architecture\": [\n    \"首屏建立品牌和商品心智\",\n    \"核心卖点用卡片或分段模块展开\",\n    \"场景模块承接用户使用想象\",\n    \"参数与品牌收尾提供决策依据\"\n  ],\n  \"tone\": \"低饱和、冷静、商务；节奏为大图 → 局部细节 → 功能说明。\",\n  \"image_strategy\": \"Image Studio 需补齐主视觉、卖点图、场景图与参数说明图；素材不足时以占位图进入设计师审核。\",\n  \"brand_constraints\": [\n    \"严格遵守品牌字体与字号\",\n    \"主色锁定 #1f2937\",\n    \"页面结构必须基于标准模块模板，不自由扩写模块体系\"\n  ],\n  \"risks\": [\n    \"实拍素材需人工抠图调色\",\n    \"文案避免绝对化与平台风险词\"\n  ]\n}",
+      "data": {
+        "direction": "对齐参考图：浅色背景 + 大图展示 + 简洁文字层级，突出商品质感与通勤属性。",
+        "page_template": [
+          "Hero",
+          "Feature",
+          "Scenario",
+          "Parameter",
+          "Brand Story",
+          "CTA"
+        ],
+        "information_architecture": [
+          "首屏建立品牌和商品心智",
+          "核心卖点用卡片或分段模块展开",
+          "场景模块承接用户使用想象",
+          "参数与品牌收尾提供决策依据"
+        ],
+        "tone": "低饱和、冷静、商务；节奏为大图 → 局部细节 → 功能说明。",
+        "image_strategy": "Image Studio 需补齐主视觉、卖点图、场景图与参数说明图；素材不足时以占位图进入设计师审核。",
+        "brand_constraints": [
+          "严格遵守品牌字体与字号",
+          "主色锁定 #1f2937",
+          "页面结构必须基于标准模块模板，不自由扩写模块体系"
+        ],
+        "risks": [
+          "实拍素材需人工抠图调色",
+          "文案避免绝对化与平台风险词"
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 53
+    },
+    {
+      "id": "layout_engine",
+      "title": "Layout Engine",
+      "icon": "grid",
+      "status": "fallback",
+      "summary": "已规划 7 个模块：Hero、Feature、Technology、Scenario、Parameter、Brand Story、CTA。",
+      "detail": "{\n  \"modules\": [\n    {\n      \"index\": 1,\n      \"name\": \"Hero\",\n      \"layer_group\": \"01_Hero\",\n      \"layout\": \"hero_split\",\n      \"role\": \"hero\",\n      \"height\": 1000,\n      \"image_role\": \"主视觉图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 2,\n      \"name\": \"Feature\",\n      \"layer_group\": \"02_Feature\",\n      \"layout\": \"three_column_cards\",\n      \"role\": \"feature\",\n      \"height\": 820,\n      \"image_role\": \"Feature用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 3,\n      \"name\": \"Technology\",\n      \"layer_group\": \"03_Technology\",\n      \"layout\": \"detail_zoom\",\n      \"role\": \"technology\",\n      \"height\": 820,\n      \"image_role\": \"Technology用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 4,\n      \"name\": \"Scenario\",\n      \"layer_group\": \"04_Scenario\",\n      \"layout\": \"full_bleed_scene\",\n      \"role\": \"scenario\",\n      \"height\": 820,\n      \"image_role\": \"Scenario用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 5,\n      \"name\": \"Parameter\",\n      \"layer_group\": \"05_Parameter\",\n      \"layout\": \"spec_table\",\n      \"role\": \"parameter\",\n      \"height\": 820,\n      \"image_role\": \"Parameter用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 6,\n      \"name\": \"Brand Story\",\n      \"layer_group\": \"06_BrandStory\",\n      \"layout\": \"minimal_logo\",\n      \"role\": \"brand_story\",\n      \"height\": 820,\n      \"image_role\": \"Brand Story用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    },\n    {\n      \"index\": 7,\n      \"name\": \"CTA\",\n      \"layer_group\": \"07_CTA\",\n      \"layout\": \"cta_panel\",\n      \"role\": \"cta\",\n      \"height\": 820,\n      \"image_role\": \"CTA用图\",\n      \"elements\": [\n        \"BG_背景\",\n        \"IMG_图片\",\n        \"TXT_标题\",\n        \"TXT_说明\"\n      ],\n      \"image_candidates\": []\n    }\n  ]\n}",
+      "data": {
+        "modules": [
+          {
+            "index": 1,
+            "name": "Hero",
+            "layer_group": "01_Hero",
+            "layout": "hero_split",
+            "role": "hero",
+            "height": 1000,
+            "image_role": "主视觉图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 2,
+            "name": "Feature",
+            "layer_group": "02_Feature",
+            "layout": "three_column_cards",
+            "role": "feature",
+            "height": 820,
+            "image_role": "Feature用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 3,
+            "name": "Technology",
+            "layer_group": "03_Technology",
+            "layout": "detail_zoom",
+            "role": "technology",
+            "height": 820,
+            "image_role": "Technology用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 4,
+            "name": "Scenario",
+            "layer_group": "04_Scenario",
+            "layout": "full_bleed_scene",
+            "role": "scenario",
+            "height": 820,
+            "image_role": "Scenario用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 5,
+            "name": "Parameter",
+            "layer_group": "05_Parameter",
+            "layout": "spec_table",
+            "role": "parameter",
+            "height": 820,
+            "image_role": "Parameter用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 6,
+            "name": "Brand Story",
+            "layer_group": "06_BrandStory",
+            "layout": "minimal_logo",
+            "role": "brand_story",
+            "height": 820,
+            "image_role": "Brand Story用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          },
+          {
+            "index": 7,
+            "name": "CTA",
+            "layer_group": "07_CTA",
+            "layout": "cta_panel",
+            "role": "cta",
+            "height": 820,
+            "image_role": "CTA用图",
+            "elements": [
+              "BG_背景",
+              "IMG_图片",
+              "TXT_标题",
+              "TXT_说明"
+            ],
+            "image_candidates": []
+          }
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 45
+    },
+    {
+      "id": "copy",
+      "title": "文案 Agent",
+      "icon": "type",
+      "status": "fallback",
+      "summary": "已生成 7 段模块文案，主标题示例：电脑包。",
+      "detail": "{\n  \"blocks\": [\n    {\n      \"headline\": \"电脑包\",\n      \"subtitle\": \"ANKORAU × ANAR FC\",\n      \"body\": \"为日常办公与通勤设计的多功能电脑包\",\n      \"points\": [\n        \"轻量通勤\",\n        \"多分区收纳\",\n        \"防泼水\"\n      ]\n    },\n    {\n      \"headline\": \"多分区收纳\",\n      \"subtitle\": \"Feature\",\n      \"body\": \"多分区收纳，贴合真实使用场景。\",\n      \"points\": []\n    },\n    {\n      \"headline\": \"防泼水\",\n      \"subtitle\": \"Technology\",\n      \"body\": \"防泼水，贴合真实使用场景。\",\n      \"points\": []\n    },\n    {\n      \"headline\": \"简洁商务风格\",\n      \"subtitle\": \"Scenario\",\n      \"body\": \"简洁商务风格，贴合真实使用场景。\",\n      \"points\": []\n    },\n    {\n      \"headline\": \"轻量通勤\",\n      \"subtitle\": \"Parameter\",\n      \"body\": \"轻量通勤，贴合真实使用场景。\",\n      \"points\": []\n    },\n    {\n      \"headline\": \"ANKORAU × ANAR FC\",\n      \"subtitle\": \"品牌规则驱动的页面收尾\",\n      \"body\": \"\",\n      \"points\": []\n    },\n    {\n      \"headline\": \"延续品牌一致的设计表达\",\n      \"subtitle\": \"进入审核与导出\",\n      \"body\": \"\",\n      \"points\": []\n    }\n  ]\n}",
+      "data": {
+        "blocks": [
+          {
+            "headline": "电脑包",
+            "subtitle": "ANKORAU × ANAR FC",
+            "body": "为日常办公与通勤设计的多功能电脑包",
+            "points": [
+              "轻量通勤",
+              "多分区收纳",
+              "防泼水"
+            ]
+          },
+          {
+            "headline": "多分区收纳",
+            "subtitle": "Feature",
+            "body": "多分区收纳，贴合真实使用场景。",
+            "points": []
+          },
+          {
+            "headline": "防泼水",
+            "subtitle": "Technology",
+            "body": "防泼水，贴合真实使用场景。",
+            "points": []
+          },
+          {
+            "headline": "简洁商务风格",
+            "subtitle": "Scenario",
+            "body": "简洁商务风格，贴合真实使用场景。",
+            "points": []
+          },
+          {
+            "headline": "轻量通勤",
+            "subtitle": "Parameter",
+            "body": "轻量通勤，贴合真实使用场景。",
+            "points": []
+          },
+          {
+            "headline": "ANKORAU × ANAR FC",
+            "subtitle": "品牌规则驱动的页面收尾",
+            "body": "",
+            "points": []
+          },
+          {
+            "headline": "延续品牌一致的设计表达",
+            "subtitle": "进入审核与导出",
+            "body": "",
+            "points": []
+          }
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 48
+    },
+    {
+      "id": "figma_psd",
+      "title": "Figma / PSD 生成 Agent",
+      "icon": "file-image",
+      "status": "fallback",
+      "summary": "已规划 7 个 Figma Frame / PSD 图层分组，文字层全部可编辑。",
+      "detail": "{\n  \"layer_tree\": [\n    {\n      \"group\": \"01_Hero\",\n      \"layers\": [\n        \"BG_背景\",\n        \"IMG_主视觉图\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"TXT_正文\",\n        \"TXT_要点1\",\n        \"TXT_要点2\",\n        \"TXT_要点3\",\n        \"LOGO_品牌\"\n      ]\n    },\n    {\n      \"group\": \"02_Feature\",\n      \"layers\": [\n        \"BG_背景\",\n        \"IMG_Feature用图\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"TXT_正文\"\n      ]\n    },\n    {\n      \"group\": \"03_Technology\",\n      \"layers\": [\n        \"BG_背景\",\n        \"IMG_Technology用图\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"TXT_正文\"\n      ]\n    },\n    {\n      \"group\": \"04_Scenario\",\n      \"layers\": [\n        \"BG_背景\",\n        \"IMG_Scenario用图\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"TXT_正文\"\n      ]\n    },\n    {\n      \"group\": \"05_Parameter\",\n      \"layers\": [\n        \"BG_背景\",\n        \"IMG_Parameter用图\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"TXT_正文\"\n      ]\n    },\n    {\n      \"group\": \"06_BrandStory\",\n      \"layers\": [\n        \"BG_背景\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"LOGO_品牌\"\n      ]\n    },\n    {\n      \"group\": \"07_CTA\",\n      \"layers\": [\n        \"BG_背景\",\n        \"TXT_主标题\",\n        \"TXT_副标题\",\n        \"LOGO_品牌\"\n      ]\n    }\n  ],\n  \"notes\": [\n    \"所有文字保留为可编辑文字图层\",\n    \"图片独立成层，命名以 IMG_ 前缀\",\n    \"每个模块独立分组，分组名带序号\"\n  ]\n}",
+      "data": {
+        "layer_tree": [
+          {
+            "group": "01_Hero",
+            "layers": [
+              "BG_背景",
+              "IMG_主视觉图",
+              "TXT_主标题",
+              "TXT_副标题",
+              "TXT_正文",
+              "TXT_要点1",
+              "TXT_要点2",
+              "TXT_要点3",
+              "LOGO_品牌"
+            ]
+          },
+          {
+            "group": "02_Feature",
+            "layers": [
+              "BG_背景",
+              "IMG_Feature用图",
+              "TXT_主标题",
+              "TXT_副标题",
+              "TXT_正文"
+            ]
+          },
+          {
+            "group": "03_Technology",
+            "layers": [
+              "BG_背景",
+              "IMG_Technology用图",
+              "TXT_主标题",
+              "TXT_副标题",
+              "TXT_正文"
+            ]
+          },
+          {
+            "group": "04_Scenario",
+            "layers": [
+              "BG_背景",
+              "IMG_Scenario用图",
+              "TXT_主标题",
+              "TXT_副标题",
+              "TXT_正文"
+            ]
+          },
+          {
+            "group": "05_Parameter",
+            "layers": [
+              "BG_背景",
+              "IMG_Parameter用图",
+              "TXT_主标题",
+              "TXT_副标题",
+              "TXT_正文"
+            ]
+          },
+          {
+            "group": "06_BrandStory",
+            "layers": [
+              "BG_背景",
+              "TXT_主标题",
+              "TXT_副标题",
+              "LOGO_品牌"
+            ]
+          },
+          {
+            "group": "07_CTA",
+            "layers": [
+              "BG_背景",
+              "TXT_主标题",
+              "TXT_副标题",
+              "LOGO_品牌"
+            ]
+          }
+        ],
+        "notes": [
+          "所有文字保留为可编辑文字图层",
+          "图片独立成层，命名以 IMG_ 前缀",
+          "每个模块独立分组，分组名带序号"
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 40
+    },
+    {
+      "id": "design_score",
+      "title": "Design Score",
+      "icon": "check-circle",
+      "status": "completed",
+      "summary": "综合评分 83.2，品牌匹配 87，布局质量 83。",
+      "detail": "{\n  \"brand_match\": 87,\n  \"layout_quality\": 83,\n  \"visual_consistency\": 84,\n  \"readability\": 82,\n  \"conversion_score\": 80,\n  \"overall\": 83.2,\n  \"explain\": [\n    \"评分用于给设计负责人提供可解释审核依据，不替代人工判断。\",\n    \"品牌匹配优先参考 Core Rule、Derived Rule 与当前页面模板。\",\n    \"缺少商品实拍或场景素材时，视觉一致性和转化评分会被扣分。\"\n  ],\n  \"blocking_issues\": [\n    \"建议补充高质量商品图后再导出正式设计稿\"\n  ]\n}",
+      "data": {
+        "brand_match": 87,
+        "layout_quality": 83,
+        "visual_consistency": 84,
+        "readability": 82,
+        "conversion_score": 80,
+        "overall": 83.2,
+        "explain": [
+          "评分用于给设计负责人提供可解释审核依据，不替代人工判断。",
+          "品牌匹配优先参考 Core Rule、Derived Rule 与当前页面模板。",
+          "缺少商品实拍或场景素材时，视觉一致性和转化评分会被扣分。"
+        ],
+        "blocking_issues": [
+          "建议补充高质量商品图后再导出正式设计稿"
+        ]
+      },
+      "used_model": false,
+      "elapsed_ms": 31
+    },
+    {
+      "id": "output_review",
+      "title": "输出、审核与反馈",
+      "icon": "check-circle",
+      "status": "completed",
+      "summary": "已产出：商品详情页结构化方案、Figma 页面、PSD 兼容文件；下一步进入人工审核并记录设计反馈。",
+      "detail": "{\n  \"produced\": [\n    \"商品详情页结构化方案\",\n    \"Figma 页面\",\n    \"PSD 兼容文件\"\n  ],\n  \"review_checklist\": [\n    \"品牌一致性：是否符合品牌视觉规范\",\n    \"字体字号：是否使用指定字体和允许字号\",\n    \"图片质量：抠图、清晰度、色彩是否达标\",\n    \"版式质量：是否接近参考图风格、是否美观\",\n    \"文案准确性：是否与 brief 一致、是否有夸大\",\n    \"Figma/PSD 可编辑性：图层是否清晰、文字是否可编辑\"\n  ],\n  \"feedback_capture\": {\n    \"tracked_changes\": [\n      \"模块隐藏/删除\",\n      \"字体字号调整\",\n      \"颜色调整\",\n      \"文案修改\",\n      \"图片替换\"\n    ],\n    \"learning_policy\": \"本阶段只记录设计师修改，不自动强化学习、不自动覆盖品牌规则。\"\n  },\n  \"next_step\": \"进入人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。\"\n}",
+      "data": {
+        "produced": [
+          "商品详情页结构化方案",
+          "Figma 页面",
+          "PSD 兼容文件"
+        ],
+        "review_checklist": [
+          "品牌一致性：是否符合品牌视觉规范",
+          "字体字号：是否使用指定字体和允许字号",
+          "图片质量：抠图、清晰度、色彩是否达标",
+          "版式质量：是否接近参考图风格、是否美观",
+          "文案准确性：是否与 brief 一致、是否有夸大",
+          "Figma/PSD 可编辑性：图层是否清晰、文字是否可编辑"
+        ],
+        "feedback_capture": {
+          "tracked_changes": [
+            "模块隐藏/删除",
+            "字体字号调整",
+            "颜色调整",
+            "文案修改",
+            "图片替换"
+          ],
+          "learning_policy": "本阶段只记录设计师修改，不自动强化学习、不自动覆盖品牌规则。"
+        },
+        "next_step": "进入人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。"
+      },
+      "used_model": false,
+      "elapsed_ms": 29
+    }
+  ],
+  "logs": [
+    "[12:50:06][Workflow] 工作流启动\n{\n  \"project_name\": \"BrandOS 商品详情页设计任务\",\n  \"brand_name\": \"ANKORAU × ANAR FC\",\n  \"product_name\": \"电脑包\",\n  \"assets\": []\n}",
+    "[12:50:06][Workflow] 开始阶段：商品理解 Agent (product_understanding)",
+    "[12:50:06][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：商品理解 Agent (product_understanding)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：商品理解 Agent (product_understanding)，status=fallback，used_model=False，elapsed_ms=620，summary=按文件名/brief 规则推断：电脑包，主色 以参考图为准（浅蓝 / 低饱和），关键特征：轻量通勤、多分区收纳、防泼水、简洁商务风格。",
+    "[12:50:07][Workflow] 开始阶段：Product Brief (product_brief)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：Product Brief (product_brief)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：Product Brief (product_brief)，status=fallback，used_model=False，elapsed_ms=48，summary=统一商品结构已生成，核心卖点：轻量通勤、多分区收纳、防泼水、简洁商务风格。",
+    "[12:50:07][Workflow] 开始阶段：品牌知识库 / 规则版本 (brand_knowledge)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：品牌知识库 / 规则版本 (brand_knowledge)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：品牌知识库 / 规则版本 (brand_knowledge)，status=fallback，used_model=False，elapsed_ms=57，summary=规则版本：Brand Rule V4.0；Core/Derived/Asset 权重 {'core_rule': 0.7, 'derived_rule': 0.2, 'asset_memory': 0.1}；主色 #1f2937；字体 标题/方正兰亭特黑简体 正文/方正兰亭黑简体。",
+    "[12:50:07][Workflow] 开始阶段：页面规划 Agent (page_planner)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：页面规划 Agent (page_planner)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：页面规划 Agent (page_planner)，status=fallback，used_model=False，elapsed_ms=53，summary=对齐参考图：浅色背景 + 大图展示 + 简洁文字层级，突出商品质感与通勤属性。",
+    "[12:50:07][Workflow] 开始阶段：Layout Engine (layout_engine)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：Layout Engine (layout_engine)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：Layout Engine (layout_engine)，status=fallback，used_model=False，elapsed_ms=45，summary=已规划 7 个模块：Hero、Feature、Technology、Scenario、Parameter、Brand Story、CTA。",
+    "[12:50:07][Workflow] 开始阶段：文案 Agent (copy)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：文案 Agent (copy)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：文案 Agent (copy)，status=fallback，used_model=False，elapsed_ms=48，summary=已生成 7 段模块文案，主标题示例：电脑包。",
+    "[12:50:07][Workflow] 开始阶段：Figma / PSD 生成 Agent (figma_psd)",
+    "[12:50:07][LLM] 初始化模型：provider=openai, model=qwen-plus",
+    "[12:50:07][Workflow] 阶段降级：Figma / PSD 生成 Agent (figma_psd)，原因：未配置模型 API Key（请在界面填写或设置环境变量）",
+    "[12:50:07][Workflow] 结束阶段：Figma / PSD 生成 Agent (figma_psd)，status=fallback，used_model=False，elapsed_ms=40，summary=已规划 7 个 Figma Frame / PSD 图层分组，文字层全部可编辑。",
+    "[12:50:07][Workflow] 开始阶段：Design Score (design_score)",
+    "[12:50:07][Workflow] 结束阶段：Design Score (design_score)，status=completed，used_model=False，elapsed_ms=31，summary=综合评分 83.2，品牌匹配 87，布局质量 83。\n{\n  \"brand_match\": 87,\n  \"layout_quality\": 83,\n  \"visual_consistency\": 84,\n  \"readability\": 82,\n  \"conversion_score\": 80,\n  \"overall\": 83.2,\n  \"explain\": [\n    \"评分用于给设计负责人提供可解释审核依据，不替代人工判断。\",\n    \"品牌匹配优先参考 Core Rule、Derived Rule 与当前页面模板。\",\n    \"缺少商品实拍或场景素材时，视觉一致性和转化评分会被扣分。\"\n  ],\n  \"blocking_issues\": [\n    \"建议补充高质量商品图后再导出正式设计稿\"\n  ]\n}",
+    "[12:50:07][Workflow] 开始阶段：输出、审核与反馈 (output_review)",
+    "[12:50:07][Workflow] 结束阶段：输出、审核与反馈 (output_review)，status=completed，used_model=False，elapsed_ms=29，summary=已产出：商品详情页结构化方案、Figma 页面、PSD 兼容文件；下一步进入人工审核并记录设计反馈。\n{\n  \"produced\": [\n    \"商品详情页结构化方案\",\n    \"Figma 页面\",\n    \"PSD 兼容文件\"\n  ],\n  \"review_checklist\": [\n    \"品牌一致性：是否符合品牌视觉规范\",\n    \"字体字号：是否使用指定字体和允许字号\",\n    \"图片质量：抠图、清晰度、色彩是否达标\",\n    \"版式质量：是否接近参考图风格、是否美观\",\n    \"文案准确性：是否与 brief 一致、是否有夸大\",\n    \"Figma/PSD 可编辑性：图层是否清晰、文字是否可编辑\"\n  ],\n  \"feedback_capture\": {\n    \"tracked_changes\": [\n      \"模块隐藏/删除\",\n      \"字体字号调整\",\n      \"颜色调整\",\n      \"文案修改\",\n      \"图片替换\"\n    ],\n    \"learning_policy\": \"本阶段只记录设计师修改，不自动强化学习、不自动覆盖品牌规则。\"\n  },\n  \"next_step\": \"进入人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。\"\n}",
+    "[12:50:07][Workflow] 工作流完成\n{\n  \"stage_count\": 9\n}"
+  ]
+}

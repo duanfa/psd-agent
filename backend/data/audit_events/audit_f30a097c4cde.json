@@ -1,0 +1,13 @@
+{
+  "id": "audit_f30a097c4cde",
+  "created_at": "2026-06-26T03:21:08Z",
+  "updated_at": "2026-06-26T03:21:08Z",
+  "brand_id": "brand_default",
+  "entity_type": "rule_version",
+  "entity_id": "rule_105822762e02",
+  "action": "created",
+  "message": "创建规则版本：Brand Rule V2.0",
+  "payload": {
+    "status": "draft"
+  }
+}

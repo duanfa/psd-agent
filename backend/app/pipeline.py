@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .llm import LLMClient, LLMUnavailable
-from .models import StageResult, UploadedAsset, WorkflowRequest
+from .models import BrandRecord, BrandRuleVersionRecord, StageResult, UploadedAsset, WorkflowRequest
 from .runtime import append_log, append_stage_result, reset_run, set_run_state
 
 
@@ -60,6 +60,9 @@ class PipelineContext:
     assets: list[UploadedAsset]
     llm: LLMClient
     run_id: str = ""
+    brand: BrandRecord | None = None
+    rule_version: BrandRuleVersionRecord | None = None
+    referenced_asset_ids: list[str] = field(default_factory=list)
     cancel_checker: Callable[[], bool] = lambda: False
     warnings: list[str] = field(default_factory=list)
     product_info: dict[str, Any] = field(default_factory=dict)
@@ -321,8 +324,11 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
     req = ctx.request
 
     def model_fn() -> dict[str, Any]:
+        base_profile = ctx.rule_version.brand_profile if ctx.rule_version else {}
         prompt = (
             f"品牌：{req.brand_name}\n"
+            f"当前规则版本：{ctx.rule_version.version_label if ctx.rule_version else '未指定'}\n"
+            f"当前已发布规则：{json.dumps(base_profile, ensure_ascii=False)}\n"
             f"品牌规范：\n{req.brand_guidelines}\n"
             f"参考图说明：\n{req.reference_notes}\n"
             f"参考案例图片：{ctx.reference_images}\n"
@@ -334,12 +340,17 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             "fonts(对象，含 title、body、english), layout_rules(数组), component_patterns(数组), prompt_templates(数组), module_order(数组)。"
         )
         data = ctx.llm.invoke_json(req.prompts.brand_rag_agent_prompt, prompt)
+        if base_profile:
+            merged = dict(base_profile)
+            merged.update(data)
+            data = merged
         ctx.brand_profile = data
         return data
 
     def fallback_fn() -> dict[str, Any]:
+        base_profile = ctx.rule_version.brand_profile if ctx.rule_version else {}
         data = {
-            "version": "Brand Rule V1.1",
+            "version": ctx.rule_version.version_label if ctx.rule_version else "Brand Rule V1.1",
             "rule_status": "draft_pending_approval",
             "core_rule": {
                 "brand_name": req.brand_name,
@@ -387,13 +398,17 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
                 "CTA",
             ],
         }
+        if base_profile:
+            merged = dict(base_profile)
+            merged.update(data)
+            data = merged
         ctx.brand_profile = data
         return data
 
     def summarize(data: dict[str, Any], used: bool) -> str:
         fonts = data.get("fonts", {})
         return (
-            f"规则版本：{data.get('version', '-')}；"
+            f"规则版本：{ctx.rule_version.version_label if ctx.rule_version else data.get('version', '-')}；"
             f"Core/Derived/Asset 权重 {data.get('rule_weights', {})}；"
             f"主色 {data.get('primary_color', '-')}；字体 标题/{fonts.get('title', '-')} 正文/{fonts.get('body', '-')}。"
         )
@@ -798,6 +813,9 @@ def run_pipeline(
     request: WorkflowRequest,
     assets: list[UploadedAsset],
     run_id: str = "",
+    brand: BrandRecord | None = None,
+    rule_version: BrandRuleVersionRecord | None = None,
+    referenced_asset_ids: list[str] | None = None,
     cancel_checker: Callable[[], bool] | None = None,
 ) -> tuple[list[StageResult], PipelineContext]:
     reset_run(run_id or "local")
@@ -806,6 +824,9 @@ def run_pipeline(
         assets=assets,
         llm=LLMClient(request.model_settings, run_id=run_id or "local"),
         run_id=run_id or "local",
+        brand=brand,
+        rule_version=rule_version,
+        referenced_asset_ids=referenced_asset_ids or [],
         cancel_checker=cancel_checker or (lambda: False),
     )
     set_run_state(ctx.run_id, "running", None)

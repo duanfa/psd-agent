@@ -1,0 +1,11 @@
+{
+  "id": "audit_1c35e4d22b85",
+  "created_at": "2026-06-26T03:02:58Z",
+  "updated_at": "2026-06-26T03:02:58Z",
+  "brand_id": "brand_b7e8d1fd77ea",
+  "entity_type": "brand",
+  "entity_id": "brand_b7e8d1fd77ea",
+  "action": "created",
+  "message": "创建品牌：Smoke Brand b9fa56",
+  "payload": {}
+}

@@ -1,0 +1,11 @@
+{
+  "id": "audit_67d25b61b521",
+  "created_at": "2026-06-26T03:21:12Z",
+  "updated_at": "2026-06-26T03:21:12Z",
+  "brand_id": "brand_default",
+  "entity_type": "rule_version",
+  "entity_id": "rule_default_v1",
+  "action": "rolled_back",
+  "message": "回滚规则版本：Brand Rule V1.0",
+  "payload": {}
+}

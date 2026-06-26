@@ -1,0 +1,17 @@
+{
+  "id": "brand_default",
+  "created_at": "2026-06-26T02:50:18Z",
+  "updated_at": "2026-06-26T03:22:28Z",
+  "name": "ANKORAU × ANAR FC",
+  "code": "ankorau-anar-fc",
+  "description": "BrandOS MVP 默认品牌空间",
+  "status": "active",
+  "owner": "local-admin",
+  "members": [
+    "local-admin"
+  ],
+  "current_rule_version_id": "rule_8c40fce30d21",
+  "metadata": {
+    "seeded": true
+  }
+}

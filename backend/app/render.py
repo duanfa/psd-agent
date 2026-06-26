@@ -22,9 +22,11 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
         "project": {
             "name": req.project_name,
             "brand": req.brand_name,
+            "brand_id": req.brand_id,
             "product": req.product_name,
             "workflow_mode": req.workflow_mode.value,
             "output_types": [item.value for item in req.output_types],
+            "rule_version_id": req.rule_version_id,
         },
         "canvas": {
             "width": req.layout.canvas_width,
@@ -35,6 +37,7 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
         "typography": req.typography.model_dump(),
         "layout_settings": req.layout.model_dump(),
         "asset_summary": summarize_assets(ctx.assets),
+        "referenced_asset_ids": ctx.referenced_asset_ids,
         "product_info": ctx.product_info,
         "structured_info": ctx.structured_info,
         "brand_profile": ctx.brand_profile,

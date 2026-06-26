@@ -1,0 +1,17 @@
+{
+  "id": "asset_fedb19520316",
+  "created_at": "2026-06-26T03:21:50Z",
+  "updated_at": "2026-06-26T03:22:45Z",
+  "brand_id": "brand_default",
+  "name": "0523安高若2674-1.png",
+  "content_type": "image/png",
+  "size": 5625215,
+  "bucket": "image",
+  "role": "reference",
+  "training_status": "candidate",
+  "path": "D:\\Code\\psd-agent-main\\backend\\data\\asset_files\\brand_default\\0523安高若2674-1.png",
+  "enabled": true,
+  "source": "upload",
+  "notes": "",
+  "tags": []
+}

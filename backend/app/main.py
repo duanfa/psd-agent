@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import uuid
 from pathlib import Path
 
@@ -11,10 +10,28 @@ from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
 from .defaults import load_workflow_defaults
-from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
+from .file_utils import save_uploaded_assets
+from .models import (
+    AssetRole,
+    AssetTrainingStatus,
+    BrandAssetRecord,
+    RunArtifactRefs,
+    UploadedAsset,
+    WorkflowArtifacts,
+    WorkflowRequest,
+    WorkflowResult,
+    WorkflowRunRecord,
+    generate_id,
+    utc_now_iso,
+)
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
 from .render import build_design_spec, write_artifacts
+from .routers.assets import router as assets_router
+from .routers.brands import router as brands_router
+from .routers.rule_versions import router as rule_versions_router
+from .routers.runs import router as runs_router
 from .runtime import append_log, get_run_snapshot, set_run_state
+from .store import get_store
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = APP_ROOT / "runs"
@@ -28,6 +45,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(brands_router)
+app.include_router(assets_router)
+app.include_router(rule_versions_router)
+app.include_router(runs_router)
 
 
 @app.get("/api/health")
@@ -82,65 +103,6 @@ def _safe_run_id(run_id: str | None) -> str:
     return cleaned[:80] or uuid.uuid4().hex
 
 
-def _extract_spreadsheet_text(path: Path) -> str | None:
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        try:
-            return path.read_text(encoding="utf-8")[:16000]
-        except UnicodeDecodeError:
-            return path.read_text(encoding="gb18030", errors="ignore")[:16000]
-        except Exception:
-            return None
-    if suffix not in {".xlsx", ".xlsm"}:
-        return None
-    try:
-        from openpyxl import load_workbook
-    except Exception:
-        return None
-
-    try:
-        workbook = load_workbook(path, read_only=True, data_only=True)
-        lines: list[str] = []
-        for sheet in workbook.worksheets[:6]:
-            lines.append(f"[Sheet] {sheet.title}")
-            count = 0
-            for row in sheet.iter_rows(values_only=True):
-                values = [str(value).strip() for value in row if value not in (None, "")]
-                if values:
-                    lines.append(" | ".join(values))
-                    count += 1
-                if count >= 120:
-                    break
-        return "\n".join(lines)[:16000]
-    except Exception:
-        return None
-
-
-async def _save_assets(
-    files: list[UploadFile],
-    input_dir: Path,
-    bucket_override: str | None = None,
-) -> list[UploadedAsset]:
-    input_dir.mkdir(parents=True, exist_ok=True)
-    assets: list[UploadedAsset] = []
-    for file in files:
-        filename = _safe_filename(file.filename or "asset")
-        target = input_dir / filename
-        with target.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        assets.append(
-            UploadedAsset(
-                name=filename,
-                content_type=file.content_type,
-                size=target.stat().st_size,
-                saved_path=str(target),
-                extracted_text=_extract_spreadsheet_text(target),
-                bucket=bucket_override or classify_asset(filename, file.content_type),
-            )
-        )
-    return assets
-
-
 def _merge_payload(incoming: dict) -> dict:
     data = load_workflow_defaults()
     for key, value in incoming.items():
@@ -151,6 +113,68 @@ def _merge_payload(incoming: dict) -> dict:
         else:
             data[key] = value
     return data
+
+
+def _resolve_brand_context(request: WorkflowRequest):
+    store = get_store()
+    brand_id = request.brand_id or "brand_default"
+    brand = store.get_brand(brand_id)
+    if not brand:
+        raise HTTPException(status_code=404, detail="brand not found")
+    rule_version = (
+        store.get_rule_version(request.rule_version_id)
+        if request.rule_version_id
+        else store.get_current_rule_version(brand.id)
+    )
+    request.brand_id = brand.id
+    request.brand_name = brand.name
+    if rule_version:
+        request.rule_version_id = rule_version.id
+        core_rule = rule_version.brand_profile.get("core_rule", {})
+        asset_memory = rule_version.brand_profile.get("asset_memory", {})
+        guidelines = str(core_rule.get("brand_guidelines", "")).strip()
+        reference_notes = str(asset_memory.get("reference_notes", "")).strip()
+        if guidelines and guidelines not in request.brand_guidelines:
+            request.brand_guidelines = "\n\n".join(
+                part for part in [guidelines, request.brand_guidelines] if part
+            )
+        if reference_notes and reference_notes not in request.reference_notes:
+            request.reference_notes = "\n\n".join(
+                part for part in [reference_notes, request.reference_notes] if part
+            )
+    return brand, rule_version
+
+
+def _register_workflow_assets(brand_id: str | None, assets: list[UploadedAsset]) -> list[str]:
+    if not brand_id:
+        return []
+    store = get_store()
+    referenced_ids: list[str] = []
+    for asset in assets:
+        asset_record = BrandAssetRecord(
+            id=generate_id("asset"),
+            brand_id=brand_id,
+            name=asset.name,
+            content_type=asset.content_type,
+            size=asset.size,
+            bucket=asset.bucket,
+            role=(
+                AssetRole.high_quality_case
+                if asset.bucket in {"image", "reference_image"}
+                else AssetRole.reference
+            ),
+            training_status=(
+                AssetTrainingStatus.candidate
+                if asset.bucket in {"image", "reference_image", "brief"}
+                else AssetTrainingStatus.excluded
+            ),
+            path=asset.saved_path or "",
+            source="workflow_input",
+            notes="由工作流上传自动登记的任务输入资产。",
+        )
+        store.create_asset(asset_record)
+        referenced_ids.append(asset_record.id)
+    return referenced_ids
 
 
 @app.post("/api/workflows/generate", response_model=WorkflowResult)
@@ -175,9 +199,9 @@ async def generate_workflow(
     input_dir = run_dir / "inputs"
     output_dir = run_dir / "outputs"
     assets = [
-        *await _save_assets(files, input_dir / "assets"),
-        *await _save_assets(brief_files, input_dir / "brief", bucket_override="brief"),
-        *await _save_assets(
+        *await save_uploaded_assets(files, input_dir / "assets"),
+        *await save_uploaded_assets(brief_files, input_dir / "brief", bucket_override="brief"),
+        *await save_uploaded_assets(
             reference_images,
             input_dir / "reference_images",
             bucket_override="reference_image",
@@ -192,20 +216,54 @@ async def generate_workflow(
             part for part in [request.product_brief, spreadsheet_text] if part
         )
 
+    brand, rule_version = _resolve_brand_context(request)
+    referenced_asset_ids = _register_workflow_assets(request.brand_id, assets)
+    store = get_store()
+    run_started_at = utc_now_iso()
+    store.create_run(
+        WorkflowRunRecord(
+            id=run_id,
+            brand_id=request.brand_id,
+            rule_version_id=request.rule_version_id,
+            project_name=request.project_name,
+            product_name=request.product_name,
+            status="queued",
+            workflow_mode=request.workflow_mode.value,
+            output_types=[item.value for item in request.output_types],
+            input_payload=request.model_dump(by_alias=True),
+            referenced_asset_ids=referenced_asset_ids,
+            asset_names=[asset.name for asset in assets],
+            run_started_at=run_started_at,
+        )
+    )
+
     try:
         stages, ctx = run_pipeline(
             request,
             assets,
             run_id=run_id,
+            brand=brand,
+            rule_version=rule_version,
+            referenced_asset_ids=referenced_asset_ids,
             cancel_checker=lambda: run_id in CANCELLED_RUNS,
         )
     except WorkflowCancelled as exc:
         CANCELLED_RUNS.discard(run_id)
         set_run_state(run_id, "cancelled", None)
+        store.update_run(
+            run_id,
+            status="cancelled",
+            run_finished_at=utc_now_iso(),
+        )
         raise HTTPException(status_code=499, detail=str(exc)) from exc
     except Exception:
         CANCELLED_RUNS.discard(run_id)
         set_run_state(run_id, "failed", None)
+        store.update_run(
+            run_id,
+            status="failed",
+            run_finished_at=utc_now_iso(),
+        )
         raise
     CANCELLED_RUNS.discard(run_id)
     spec = build_design_spec(ctx)
@@ -213,22 +271,43 @@ async def generate_workflow(
 
     used_model = any(stage.used_model for stage in stages)
     agent_report = "\n\n".join(ctx.report_parts)
+    run_finished_at = utc_now_iso()
+    final_status = "completed" if used_model else "fallback_completed"
+    artifacts = WorkflowArtifacts(
+        run_id=run_id,
+        output_dir=str(output_dir),
+        **artifact_paths,
+    )
+    store.update_run(
+        run_id,
+        status=final_status,
+        run_finished_at=run_finished_at,
+        warnings=ctx.warnings,
+        artifacts=RunArtifactRefs(
+            output_dir=artifacts.output_dir,
+            preview_svg=artifacts.preview_svg,
+            design_spec=artifacts.design_spec,
+            photoshop_jsx=artifacts.photoshop_jsx,
+            readme=artifacts.readme,
+        ),
+    )
 
     return WorkflowResult(
         run_id=run_id,
-        status="completed" if used_model else "fallback_completed",
+        status=final_status,
+        brand_id=request.brand_id,
+        rule_version_id=request.rule_version_id,
         summary="BrandOS 设计任务已完成：含品牌规则分层、页面结构、SVG 预览、Figma/PSD 结构说明、评分与反馈清单。",
         used_deepagents=used_model,
         stages=stages,
         agent_report=agent_report,
         design_spec=spec,
-        artifacts=WorkflowArtifacts(
-            run_id=run_id,
-            output_dir=str(output_dir),
-            **artifact_paths,
-        ),
+        artifacts=artifacts,
         assets=assets,
         warnings=ctx.warnings,
+        run_started_at=run_started_at,
+        run_finished_at=run_finished_at,
+        referenced_asset_ids=referenced_asset_ids,
     )
 
 

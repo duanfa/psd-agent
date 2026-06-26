@@ -23,16 +23,37 @@ import {
   API_BASE,
   artifactUrl,
   cancelWorkflow,
+  createBrand,
+  fetchAssets,
+  fetchBrandDetails,
+  fetchBrands,
   fetchDefaults,
+  fetchRuleVersionDiff,
+  fetchRuleVersions,
+  fetchRuns,
   fetchWorkflowLogs,
   generateWorkflow,
+  publishRuleVersion,
+  rollbackRuleVersion,
+  trainRuleVersion,
+  updateAsset,
+  uploadAsset,
   type AgentPrompts,
+  type BrandAssetRecord,
+  type BrandRecord,
+  type BrandRuleVersionRecord,
   type OutputType,
+  type RuleVersionDiffResponse,
   type StageMeta,
   type WorkflowPayload,
   type WorkflowResult,
+  type WorkflowRunRecord,
 } from "@/lib/api";
+import { AssetManager } from "./AssetManager";
+import { BrandSidebar } from "./BrandSidebar";
 import { PipelineRibbon } from "./PipelineRibbon";
+import { RuleVersionPanel } from "./RuleVersionPanel";
+import { RunHistoryPanel } from "./RunHistoryPanel";
 import { Section } from "./Section";
 import { StageTimeline } from "./StageTimeline";
 
@@ -80,6 +101,15 @@ function patchSection<K extends ConfigSection>(
 export function PsdWorkflowApp() {
   const [payload, setPayload] = useState<WorkflowPayload | null>(null);
   const [stages, setStages] = useState<StageMeta[]>(FALLBACK_STAGES);
+  const [brands, setBrands] = useState<BrandRecord[]>([]);
+  const [selectedBrandId, setSelectedBrandId] = useState<string | null>(null);
+  const [currentRuleVersion, setCurrentRuleVersion] = useState<BrandRuleVersionRecord | null>(null);
+  const [ruleVersions, setRuleVersions] = useState<BrandRuleVersionRecord[]>([]);
+  const [selectedRuleVersionId, setSelectedRuleVersionId] = useState<string | null>(null);
+  const [ruleDiff, setRuleDiff] = useState<RuleVersionDiffResponse | null>(null);
+  const [brandAssets, setBrandAssets] = useState<BrandAssetRecord[]>([]);
+  const [runHistory, setRunHistory] = useState<WorkflowRunRecord[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [files, setFiles] = useState<File[]>([]);
   const [briefFiles, setBriefFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<File[]>([]);
@@ -95,25 +125,75 @@ export function PsdWorkflowApp() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchDefaults()
-      .then((defaults) => {
-        setPayload(defaults.payload);
-        if (defaults.stages?.length) setStages(defaults.stages);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void bootstrap();
   }, []);
 
+  const bootstrap = async () => {
+    try {
+      const [defaults, brandList] = await Promise.all([fetchDefaults(), fetchBrands()]);
+      setPayload(defaults.payload);
+      if (defaults.stages?.length) setStages(defaults.stages);
+      setBrands(brandList);
+      const defaultBrandId = defaults.payload.brand_id ?? brandList[0]?.id ?? null;
+      if (defaultBrandId) {
+        setSelectedBrandId(defaultBrandId);
+        await loadBrandWorkspace(defaultBrandId, defaults.payload);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const loadBrandWorkspace = async (brandId: string, basePayload?: WorkflowPayload | null) => {
+    const [brandDetails, assets, versions, runs] = await Promise.all([
+      fetchBrandDetails(brandId),
+      fetchAssets(brandId),
+      fetchRuleVersions(brandId),
+      fetchRuns(brandId),
+    ]);
+    setCurrentRuleVersion(brandDetails.current_rule_version ?? null);
+    setBrandAssets(assets);
+    setRuleVersions(versions);
+    setRunHistory(runs);
+    const chosenRuleVersionId = brandDetails.current_rule_version?.id ?? versions[0]?.id ?? null;
+    setSelectedRuleVersionId(chosenRuleVersionId);
+    setSelectedRunId(runs[0]?.id ?? null);
+    setRuleDiff(null);
+    setPayload((current) => {
+      const source = basePayload ?? current;
+      if (!source) return current;
+      return {
+        ...source,
+        brand_id: brandId,
+        brand_name: brandDetails.item.name,
+        rule_version_id: chosenRuleVersionId ?? undefined,
+      };
+    });
+  };
+
   const previewUrl = useMemo(
-    () => (result?.run_id ? artifactUrl(result.run_id, "preview.svg") : null),
-    [result],
+    () => {
+      if (result?.run_id) return artifactUrl(result.run_id, "preview.svg");
+      if (selectedRunId) return `${API_BASE}/api/runs/${selectedRunId}/artifacts/preview.svg`;
+      return null;
+    },
+    [result, selectedRunId],
   );
+
+  const activeArtifactRunId = result?.run_id ?? selectedRunId;
 
   const selectedStage = useMemo(
     () => stages.find((stage) => stage.id === selectedStageId),
     [selectedStageId, stages],
   );
 
-  const timelineStages = loading || liveStages.length ? liveStages : result?.stages ?? [];
+  const selectedRun = useMemo(
+    () => runHistory.find((item) => item.id === selectedRunId) ?? null,
+    [runHistory, selectedRunId],
+  );
+
+  const timelineStages =
+    loading || liveStages.length ? liveStages : result?.stages ?? selectedRun?.stage_results ?? [];
 
   useEffect(() => {
     if (!currentRunId) return;
@@ -208,6 +288,12 @@ export function PsdWorkflowApp() {
 
   const handleGenerate = async () => {
     const runId = crypto.randomUUID();
+    const nextPayload = {
+      ...payload,
+      brand_id: selectedBrandId ?? payload.brand_id,
+      rule_version_id: selectedRuleVersionId ?? payload.rule_version_id,
+    };
+    setPayload(nextPayload);
     setCurrentRunId(runId);
     setCurrentStageId(null);
     setSelectedStageId(null);
@@ -220,7 +306,7 @@ export function PsdWorkflowApp() {
     setResult(null);
     try {
       const workflowResult = await generateWorkflow(
-        payload,
+        nextPayload,
         files,
         runId,
         briefFiles,
@@ -232,6 +318,11 @@ export function PsdWorkflowApp() {
       setLiveStages(snapshot.stages);
       setWorkflowLogStatus(snapshot.status);
       setCurrentStageId(snapshot.current_stage ?? null);
+      if (selectedBrandId) {
+        const runs = await fetchRuns(selectedBrandId);
+        setRunHistory(runs);
+        setSelectedRunId(runs[0]?.id ?? workflowResult.run_id);
+      }
     } catch (err) {
       try {
         const snapshot = await fetchWorkflowLogs(runId);
@@ -260,6 +351,80 @@ export function PsdWorkflowApp() {
       setCancelling(false);
       setError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const handleSelectBrand = async (brandId: string) => {
+    setSelectedBrandId(brandId);
+    setError(null);
+    try {
+      await loadBrandWorkspace(brandId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleCreateBrand = async (input: {
+    name: string;
+    code?: string;
+    description?: string;
+  }) => {
+    const brand = await createBrand(input);
+    const items = await fetchBrands();
+    setBrands(items);
+    setSelectedBrandId(brand.id);
+    await loadBrandWorkspace(brand.id);
+  };
+
+  const handleUploadBrandAsset = async (file: File) => {
+    if (!selectedBrandId) return;
+    await uploadAsset({
+      brandId: selectedBrandId,
+      file,
+      role: "reference",
+      trainingStatus: "candidate",
+    });
+    setBrandAssets(await fetchAssets(selectedBrandId));
+  };
+
+  const handleUpdateBrandAsset = async (
+    assetId: string,
+    patch: Partial<Pick<BrandAssetRecord, "role" | "training_status" | "enabled">>,
+  ) => {
+    await updateAsset(assetId, patch);
+    if (selectedBrandId) {
+      setBrandAssets(await fetchAssets(selectedBrandId));
+    }
+  };
+
+  const handleTrainRuleVersion = async () => {
+    if (!selectedBrandId) return;
+    const approvedIds = brandAssets
+      .filter((asset) => asset.training_status === "approved_for_training" && asset.enabled)
+      .map((asset) => asset.id);
+    await trainRuleVersion({
+      brandId: selectedBrandId,
+      summary: "基于已批准品牌资产生成候选版本。",
+      changeReason: "BrandOS MVP 平台发起的品牌训练。",
+      assetIds: approvedIds,
+    });
+    const versions = await fetchRuleVersions(selectedBrandId);
+    setRuleVersions(versions);
+    setSelectedRuleVersionId(versions[0]?.id ?? null);
+  };
+
+  const handleViewRuleDiff = async (versionId: string) => {
+    setSelectedRuleVersionId(versionId);
+    setRuleDiff(await fetchRuleVersionDiff(versionId));
+  };
+
+  const handlePublishRuleVersion = async (versionId: string) => {
+    await publishRuleVersion(versionId);
+    if (selectedBrandId) await loadBrandWorkspace(selectedBrandId);
+  };
+
+  const handleRollbackRuleVersion = async (versionId: string) => {
+    await rollbackRuleVersion(versionId);
+    if (selectedBrandId) await loadBrandWorkspace(selectedBrandId);
   };
 
   return (
@@ -323,6 +488,68 @@ export function PsdWorkflowApp() {
         />
       </section>
 
+      <section className="platform-grid">
+        <BrandSidebar
+          brands={brands}
+          selectedBrandId={selectedBrandId}
+          currentRuleVersion={currentRuleVersion}
+          assetCount={brandAssets.length}
+          runCount={runHistory.length}
+          loading={loading}
+          onSelectBrand={(brandId) => void handleSelectBrand(brandId)}
+          onCreateBrand={handleCreateBrand}
+          onRefresh={() => void bootstrap()}
+        />
+        <AssetManager
+          assets={brandAssets}
+          selectedBrandId={selectedBrandId}
+          onUpload={handleUploadBrandAsset}
+          onUpdateAsset={handleUpdateBrandAsset}
+        />
+        <RuleVersionPanel
+          versions={ruleVersions}
+          currentRuleVersionId={currentRuleVersion?.id}
+          selectedRuleVersionId={selectedRuleVersionId}
+          diff={ruleDiff}
+          loading={loading}
+          onSelectVersion={(versionId) => {
+            setSelectedRuleVersionId(versionId);
+            setPayload((current) =>
+              current ? { ...current, rule_version_id: versionId, brand_id: selectedBrandId ?? undefined } : current,
+            );
+          }}
+          onTrain={handleTrainRuleVersion}
+          onViewDiff={handleViewRuleDiff}
+          onPublish={handlePublishRuleVersion}
+          onRollback={handleRollbackRuleVersion}
+        />
+        <RunHistoryPanel
+          runs={runHistory}
+          selectedRunId={selectedRunId}
+          onSelectRun={setSelectedRunId}
+        />
+      </section>
+
+      <section className="workspace-summary">
+        <div className="workspace-card workspace-card-primary">
+          <div className="workspace-label">当前工作台</div>
+          <div className="workspace-title">{payload.brand_name}</div>
+          <p>
+            当前使用规则版本：{selectedRuleVersionId ?? "未选择"}，可在上方规则版本区切换候选版本并直接用于生成。
+          </p>
+        </div>
+        <div className="workspace-card">
+          <div className="workspace-label">准备度</div>
+          <div className="workspace-metric">{brandAssets.length}</div>
+          <p>品牌资产总数，建议至少批准 1 个训练资产后再发起训练。</p>
+        </div>
+        <div className="workspace-card">
+          <div className="workspace-label">历史任务</div>
+          <div className="workspace-metric">{runHistory.length}</div>
+          <p>可从历史任务区选中任意一次运行，在右侧直接回看预览产物。</p>
+        </div>
+      </section>
+
       <div className="shell">
         <section className="panel config-panel">
           <div className="panel-header">
@@ -334,7 +561,7 @@ export function PsdWorkflowApp() {
           <div className="panel-scroll">
             <Section
               title="任务基础信息"
-              description="品牌、商品、Product Brief、Brief Excel 与参考案例"
+              description="任务名称、商品信息与任务级补充上下文"
               icon={<FileText size={16} />}
               defaultOpen
             >
@@ -346,10 +573,7 @@ export function PsdWorkflowApp() {
                   />
                 </Field>
                 <Field label="品牌名称">
-                  <input
-                    value={payload.brand_name}
-                    onChange={(e) => setField("brand_name", e.target.value)}
-                  />
+                  <input value={payload.brand_name} readOnly />
                 </Field>
                 <Field label="商品名称">
                   <input
@@ -446,7 +670,7 @@ export function PsdWorkflowApp() {
 
             <Section
               title="品牌资产与输出"
-              description="上传品牌规范、参考案例、商品图、字体"
+              description="本次任务临时输入资产与导出目标"
               icon={<Upload size={16} />}
               badge={files.length ? `${files.length} 个文件` : undefined}
               defaultOpen
@@ -733,7 +957,7 @@ export function PsdWorkflowApp() {
               onClick={() => {
                 setResult(null);
                 setError(null);
-                fetchDefaults().then((d) => setPayload(d.payload)).catch(() => {});
+                void bootstrap();
               }}
             >
               <RefreshCw size={15} /> 重置
@@ -766,13 +990,15 @@ export function PsdWorkflowApp() {
               <span className={`pill ${result.used_deepagents ? "pill-on" : "pill-off"}`}>
                 {result.used_deepagents ? "模型链路" : "规则链路"}
               </span>
+            ) : selectedRun ? (
+              <span className="pill pill-ghost">历史任务回看</span>
             ) : null}
           </div>
 
           <div className="panel-scroll">
             {error ? <div className="error">{error}</div> : null}
 
-            {!result && !error && !loading ? (
+            {!result && !selectedRun && !error && !loading ? (
               <div className="placeholder">
                 <Sparkles size={28} />
                 <p>
@@ -867,6 +1093,65 @@ export function PsdWorkflowApp() {
                     <summary>降级 / 提示信息（{result.warnings.length}）</summary>
                     <pre>{result.warnings.join("\n")}</pre>
                   </details>
+                ) : null}
+              </div>
+            ) : selectedRun ? (
+              <div className="result">
+                <p className="result-summary">
+                  正在回看历史任务 `{selectedRun.project_name || selectedRun.product_name}`。你可以继续修改左侧参数，
+                  或基于这个版本重新发起生成。
+                </p>
+
+                {activeArtifactRunId ? (
+                  <div className="downloads">
+                    <a
+                      className="download"
+                      href={`${API_BASE}/api/runs/${activeArtifactRunId}/artifacts/preview.svg`}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ImageIcon size={14} /> 预览 SVG
+                    </a>
+                    <a
+                      className="download"
+                      href={`${API_BASE}/api/runs/${activeArtifactRunId}/artifacts/design_spec.json`}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <Download size={14} /> 设计 JSON
+                    </a>
+                    <a
+                      className="download"
+                      href={`${API_BASE}/api/runs/${activeArtifactRunId}/artifacts/README.md`}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <FileText size={14} /> README
+                    </a>
+                  </div>
+                ) : null}
+
+                <div className="result-grid">
+                  <div className="preview-card">
+                    <div className="card-label">历史任务预览</div>
+                    {previewUrl ? (
+                      <iframe className="preview-frame" src={previewUrl} title="历史任务预览" />
+                    ) : null}
+                  </div>
+                  <div className="stages-card">
+                    <div className="card-label">历史阶段时间线</div>
+                    <StageTimeline stages={timelineStages} />
+                  </div>
+                </div>
+
+                {selectedRun.logs.length ? (
+                  <div className="log-card">
+                    <div className="card-label">
+                      任务日志
+                      <span className="log-status">任务状态：{selectedRun.status}</span>
+                    </div>
+                    <pre className="workflow-log">{selectedRun.logs.join("\n\n")}</pre>
+                  </div>
                 ) : null}
               </div>
             ) : null}

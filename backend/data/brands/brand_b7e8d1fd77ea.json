@@ -1,0 +1,13 @@
+{
+  "id": "brand_b7e8d1fd77ea",
+  "created_at": "2026-06-26T03:02:58Z",
+  "updated_at": "2026-06-26T03:02:58Z",
+  "name": "Smoke Brand b9fa56",
+  "code": "smoke-brand-b9fa56",
+  "description": "integration test brand",
+  "status": "active",
+  "owner": "local-admin",
+  "members": [],
+  "current_rule_version_id": "rule_ce82a09b2073",
+  "metadata": {}
+}

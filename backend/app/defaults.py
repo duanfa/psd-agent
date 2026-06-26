@@ -16,6 +16,8 @@ def default_workflow_payload() -> dict[str, Any]:
     return {
         "project_name": "BrandOS 商品详情页设计任务",
         "brand_name": "ANKORAU × ANAR FC",
+        "brand_id": "brand_default",
+        "rule_version_id": "rule_default_v1",
         "product_name": "电脑包",
         "product_brief": (
             "商品类型：电脑包\n"

@@ -4,6 +4,8 @@ import json
 import time
 from typing import Any
 
+from .store import get_store
+
 MAX_LOG_LINES = 1200
 
 RUN_LOGS: dict[str, list[str]] = {}
@@ -45,6 +47,7 @@ def append_log(run_id: str, scope: str, title: str, payload: Any | None = None) 
     logs.append(line)
     if len(logs) > MAX_LOG_LINES:
         del logs[: len(logs) - MAX_LOG_LINES]
+    get_store().append_run_log(run_id, line)
 
 
 def set_run_state(
@@ -60,6 +63,13 @@ def set_run_state(
         "current_stage_title": current_stage_title,
         "current_stage_icon": current_stage_icon,
     }
+    get_store().set_run_state(
+        run_id,
+        status=status,
+        current_stage=current_stage,
+        current_stage_title=current_stage_title,
+        current_stage_icon=current_stage_icon,
+    )
 
 
 def append_stage_result(run_id: str, stage: Any) -> None:
@@ -73,11 +83,21 @@ def append_stage_result(run_id: str, stage: Any) -> None:
     stages = RUN_STAGES.setdefault(run_id, [])
     stages[:] = [item for item in stages if item.get("id") != data.get("id")]
     stages.append(data)
+    get_store().append_run_stage_result(run_id, data)
 
 
 def get_run_snapshot(run_id: str) -> dict[str, Any]:
-    state = RUN_STATE.get(run_id, {"status": "unknown", "current_stage": None})
-    stages = list(RUN_STAGES.get(run_id, []))
+    persisted = get_store().get_run(run_id)
+    state = RUN_STATE.get(
+        run_id,
+        {
+            "status": persisted.status if persisted else "unknown",
+            "current_stage": persisted.current_stage if persisted else None,
+            "current_stage_title": persisted.current_stage_title if persisted else None,
+            "current_stage_icon": persisted.current_stage_icon if persisted else None,
+        },
+    )
+    stages = list(RUN_STAGES.get(run_id, persisted.stage_results if persisted else []))
     current_stage = state.get("current_stage")
     if state.get("status") == "running" and current_stage:
         if not any(stage.get("id") == current_stage for stage in stages):
@@ -98,6 +118,6 @@ def get_run_snapshot(run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "status": state.get("status", "unknown"),
         "current_stage": current_stage,
-        "logs": RUN_LOGS.get(run_id, []),
+        "logs": RUN_LOGS.get(run_id, persisted.logs if persisted else []),
         "stages": stages,
     }

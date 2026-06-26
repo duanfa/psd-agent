@@ -1,0 +1,14 @@
+{
+  "id": "audit_97cd060c41ca",
+  "created_at": "2026-06-26T04:10:31Z",
+  "updated_at": "2026-06-26T04:10:31Z",
+  "brand_id": "brand_default",
+  "entity_type": "asset",
+  "entity_id": "asset_da81548ab475",
+  "action": "created",
+  "message": "新增品牌资产：ANKORAU-STYLE-DESIGN-SYSTEM.md",
+  "payload": {
+    "role": "reference",
+    "training_status": "candidate"
+  }
+}

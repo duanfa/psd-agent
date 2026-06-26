@@ -1,0 +1,13 @@
+{
+  "id": "brand_677fc3277038",
+  "created_at": "2026-06-26T03:01:47Z",
+  "updated_at": "2026-06-26T03:01:47Z",
+  "name": "Smoke Brand f202ef",
+  "code": "smoke-brand-f202ef",
+  "description": "integration test brand",
+  "status": "active",
+  "owner": "local-admin",
+  "members": [],
+  "current_rule_version_id": "rule_0efeca8a60aa",
+  "metadata": {}
+}

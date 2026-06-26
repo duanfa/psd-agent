@@ -1,0 +1,78 @@
+{
+  "id": "rule_ce82a09b2073",
+  "created_at": "2026-06-26T03:02:58Z",
+  "updated_at": "2026-06-26T03:02:58Z",
+  "brand_id": "brand_b7e8d1fd77ea",
+  "version_number": 1,
+  "version_label": "Brand Rule V1.0",
+  "status": "published",
+  "summary": "smoke",
+  "change_reason": "integration test",
+  "source_asset_ids": [],
+  "brand_profile": {
+    "core_rule": {
+      "brand_name": "Smoke Brand b9fa56",
+      "selected_asset_count": 0
+    },
+    "derived_rule": {
+      "training_asset_names": []
+    },
+    "asset_memory": {
+      "approved_assets": [],
+      "approved_asset_ids": []
+    },
+    "rule_weights": {
+      "core_rule": 0.7,
+      "derived_rule": 0.2,
+      "asset_memory": 0.1
+    },
+    "drift_risks": [
+      "请人工确认字体、颜色和模块模板差异后再发布。",
+      "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+    ]
+  },
+  "prompt_overrides": {},
+  "diff_summary": {
+    "core_rule": {
+      "before": {},
+      "after": {
+        "brand_name": "Smoke Brand b9fa56",
+        "selected_asset_count": 0
+      }
+    },
+    "derived_rule": {
+      "before": {},
+      "after": {
+        "training_asset_names": []
+      }
+    },
+    "asset_memory": {
+      "before": {},
+      "after": {
+        "approved_assets": [],
+        "approved_asset_ids": []
+      }
+    },
+    "rule_weights": {
+      "before": {},
+      "after": {
+        "core_rule": 0.7,
+        "derived_rule": 0.2,
+        "asset_memory": 0.1
+      }
+    },
+    "drift_risks": {
+      "before": [],
+      "after": [
+        "请人工确认字体、颜色和模块模板差异后再发布。",
+        "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+      ]
+    }
+  },
+  "drift_risks": [
+    "请人工确认字体、颜色和模块模板差异后再发布。",
+    "新资产仅进入候选版本，不会自动覆盖当前已发布规则。"
+  ],
+  "published_at": "2026-06-26T03:02:58Z",
+  "rolled_back_from_version_id": null
+}

@@ -1,0 +1,13 @@
+{
+  "id": "audit_b61c65946c58",
+  "created_at": "2026-06-26T03:22:43Z",
+  "updated_at": "2026-06-26T03:22:43Z",
+  "brand_id": "brand_default",
+  "entity_type": "asset",
+  "entity_id": "asset_fedb19520316",
+  "action": "updated",
+  "message": "更新品牌资产：0523安高若2674-1.png",
+  "payload": {
+    "enabled": true
+  }
+}

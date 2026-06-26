@@ -1,0 +1,17 @@
+{
+  "id": "asset_da81548ab475",
+  "created_at": "2026-06-26T04:10:31Z",
+  "updated_at": "2026-06-26T04:22:16Z",
+  "brand_id": "brand_default",
+  "name": "ANKORAU-STYLE-DESIGN-SYSTEM.md",
+  "content_type": "text/markdown",
+  "size": 5967,
+  "bucket": "reference",
+  "role": "core_spec",
+  "training_status": "candidate",
+  "path": "D:\\Code\\psd-agent-main\\backend\\data\\asset_files\\brand_default\\ANKORAU-STYLE-DESIGN-SYSTEM.md",
+  "enabled": true,
+  "source": "upload",
+  "notes": "",
+  "tags": []
+}

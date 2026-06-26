@@ -1,0 +1,17 @@
+{
+  "id": "asset_86e7ea705d1a",
+  "created_at": "2026-06-26T03:21:41Z",
+  "updated_at": "2026-06-26T03:22:46Z",
+  "brand_id": "brand_default",
+  "name": "微信图片_2026-06-16_153142_133.png",
+  "content_type": "image/png",
+  "size": 980475,
+  "bucket": "image",
+  "role": "reference",
+  "training_status": "candidate",
+  "path": "D:\\Code\\psd-agent-main\\backend\\data\\asset_files\\brand_default\\微信图片_2026-06-16_153142_133.png",
+  "enabled": true,
+  "source": "upload",
+  "notes": "",
+  "tags": []
+}

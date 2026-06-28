@@ -1,10 +1,17 @@
 "use client";
 
-import { FileImage, FileText, Folder, Globe2, Loader2, Upload } from "lucide-react";
+import { FileImage, FileText, Folder, Globe2, Loader2, Plus, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+  brandAssetFileUrl,
+  createBrand,
+  deleteBrand,
+  deleteBrandAsset,
+  fetchBrandAssetPreview,
   fetchBrandAssetsPageWithFilters,
+  type BrandAssetPreviewResponse,
   type BrandAssetsPageResponse,
+  updateBrand,
   uploadBrandAssets,
 } from "@/lib/api";
 
@@ -29,6 +36,12 @@ interface UploadState {
   files: File[];
 }
 
+interface BrandFormState {
+  id?: number;
+  name: string;
+  status: string;
+}
+
 export function BrandAssetsPageClient({ initialData }: { initialData: BrandAssetsPageResponse }) {
   const [data, setData] = useState(initialData);
   const [filters, setFilters] = useState<FiltersState>({
@@ -45,7 +58,15 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
   });
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [savingBrand, setSavingBrand] = useState(false);
+  const [deletingAssetId, setDeletingAssetId] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [preview, setPreview] = useState<BrandAssetPreviewResponse | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [brandForm, setBrandForm] = useState<BrandFormState>({
+    name: "",
+    status: "active",
+  });
   const searchTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -56,12 +77,13 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
     }));
   }, [data.folders, data.uploadForm.folder]);
 
-  const loadData = async (nextFilters: FiltersState) => {
+  const loadData = async (nextFilters: Partial<FiltersState> = filters) => {
     setLoading(true);
     setMessage(null);
     try {
       const next = await fetchBrandAssetsPageWithFilters(nextFilters);
       setData(next);
+      setFilters(next.filters);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -82,6 +104,74 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
     void loadData(next);
   };
 
+  const resetBrandForm = () => setBrandForm({ name: "", status: "active" });
+
+  const editBrand = (brand: BrandAssetsPageResponse["brands"][number]) => {
+    setBrandForm({ id: brand.id, name: brand.name, status: brand.status });
+  };
+
+  const saveBrand = async () => {
+    if (!brandForm.name.trim()) {
+      setMessage("请输入品牌名称。");
+      return;
+    }
+    setSavingBrand(true);
+    setMessage(null);
+    try {
+      const saved = brandForm.id
+        ? await updateBrand({
+            id: brandForm.id,
+            name: brandForm.name,
+            status: brandForm.status,
+          })
+        : await createBrand({ name: brandForm.name, status: brandForm.status });
+      const successMessage = brandForm.id ? "品牌已更新。" : "品牌已创建。";
+      resetBrandForm();
+      await loadData({ ...filters, brandId: saved.id });
+      setMessage(successMessage);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingBrand(false);
+    }
+  };
+
+  const handleDeleteBrand = async (brandId: number) => {
+    const brand = data.brands.find((item) => item.id === brandId);
+    if (!brand) return;
+    if (!window.confirm(`确定删除品牌「${brand.name}」及其资产、规则和训练记录吗？`)) return;
+    setSavingBrand(true);
+    setMessage(null);
+    try {
+      await deleteBrand(brandId);
+      if (brandForm.id === brandId) resetBrandForm();
+      await loadData({ folder: "", status: "", search: "" });
+      setMessage("品牌已删除。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingBrand(false);
+    }
+  };
+
+  const handleDeleteAsset = async (assetId: number) => {
+    const asset = data.assets.find((item) => item.id === assetId);
+    if (!asset) return;
+    if (!window.confirm(`确定删除资产「${asset.name}」吗？`)) return;
+    setDeletingAssetId(assetId);
+    setMessage(null);
+    try {
+      await deleteBrandAsset(assetId);
+      if (preview?.id === assetId) setPreview(null);
+      await loadData(filters);
+      setMessage("资产已删除。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeletingAssetId(null);
+    }
+  };
+
   const handleUpload = async () => {
     if (!upload.files.length) {
       setMessage("请先选择至少一个文件。");
@@ -98,12 +188,25 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
         files: upload.files,
       });
       setUpload((current) => ({ ...current, files: [] }));
-      setMessage(`上传成功，已写入 ${result.count} 条资产记录。`);
       await loadData(filters);
+      setMessage(`上传成功，已写入 ${result.count} 条资产记录。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handlePreview = async (assetId: number) => {
+    setPreviewLoading(true);
+    setMessage(null);
+    try {
+      const result = await fetchBrandAssetPreview(assetId);
+      setPreview(result);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPreviewLoading(false);
     }
   };
 
@@ -127,20 +230,63 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
       <div className="assets-layout">
         <aside className="assets-brand-panel">
           <div className="assets-panel-title">品牌空间</div>
+          <div className="brand-manage-form">
+            <input
+              placeholder="品牌名称"
+              value={brandForm.name}
+              onChange={(e) => setBrandForm((current) => ({ ...current, name: e.target.value }))}
+            />
+            <select
+              value={brandForm.status}
+              onChange={(e) => setBrandForm((current) => ({ ...current, status: e.target.value }))}
+            >
+              <option value="active">active</option>
+              <option value="draft">draft</option>
+              <option value="paused">paused</option>
+            </select>
+            <div className="brand-manage-actions">
+              <button className="btn primary" disabled={savingBrand} type="button" onClick={saveBrand}>
+                {savingBrand ? <Loader2 className="spin" size={14} /> : <Plus size={14} />}
+                {brandForm.id ? "保存品牌" : "新增品牌"}
+              </button>
+              {brandForm.id ? (
+                <button className="btn ghost" type="button" onClick={resetBrandForm}>
+                  取消
+                </button>
+              ) : null}
+            </div>
+          </div>
           <div className="assets-brand-list">
             {data.brands.map((brand) => (
-              <button
+              <div
                 className={`assets-brand-item ${filters.brandId === brand.id ? "active" : ""}`}
                 key={brand.id}
-                type="button"
-                onClick={() => updateFilters({ brandId: brand.id })}
               >
-                <span>
-                  <strong>{brand.name}</strong>
-                  <small>{brand.status}</small>
-                </span>
-                <em>{brand.assets}</em>
-              </button>
+                <button
+                  className="assets-brand-select"
+                  type="button"
+                  onClick={() => updateFilters({ brandId: brand.id })}
+                >
+                  <span>
+                    <strong>{brand.name}</strong>
+                    <small>{brand.status}</small>
+                  </span>
+                  <em>{brand.assets}</em>
+                </button>
+                <div className="assets-brand-actions">
+                  <button type="button" onClick={() => editBrand(brand)}>
+                    编辑
+                  </button>
+                  <button
+                    className="danger-link"
+                    disabled={savingBrand || data.brands.length <= 1}
+                    type="button"
+                    onClick={() => handleDeleteBrand(brand.id)}
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
         </aside>
@@ -222,6 +368,7 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
                     <th>类型</th>
                     <th>来源</th>
                     <th>状态</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -241,11 +388,36 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
                             {asset.status}
                           </span>
                         </td>
+                        <td>
+                          <div className="table-actions">
+                            <button
+                              className="table-action"
+                              disabled={previewLoading}
+                              type="button"
+                              onClick={() => handlePreview(asset.id)}
+                            >
+                              预览
+                            </button>
+                            <button
+                              className="table-action danger"
+                              disabled={deletingAssetId === asset.id}
+                              type="button"
+                              onClick={() => handleDeleteAsset(asset.id)}
+                            >
+                              {deletingAssetId === asset.id ? (
+                                <Loader2 className="spin" size={12} />
+                              ) : (
+                                <Trash2 size={12} />
+                              )}
+                              删除
+                            </button>
+                          </div>
+                        </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td className="table-empty" colSpan={5}>
+                      <td className="table-empty" colSpan={6}>
                         没有匹配的资产记录。
                       </td>
                     </tr>
@@ -315,6 +487,63 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
           </button>
         </aside>
       </div>
+
+      {preview ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="asset-preview-modal">
+            <div className="split-line">
+              <div>
+                <h2 className="section-title">{preview.name}</h2>
+                <div className="subtitle">
+                  {preview.brandName} / {preview.folder} / {preview.contentType || "未知类型"}
+                </div>
+              </div>
+              <button className="btn ghost" type="button" onClick={() => setPreview(null)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="asset-preview-meta">
+              <span>来源：{preview.source || "未知来源"}</span>
+              <span>状态：{preview.status}</span>
+              <span>大小：{preview.size ? `${(preview.size / 1024).toFixed(1)} KB` : "未知"}</span>
+            </div>
+
+            <div className="asset-preview-body">
+              {preview.previewType === "image" && preview.fileUrl ? (
+                <img alt={preview.name} className="asset-preview-image" src={brandAssetFileUrl(preview.fileUrl)} />
+              ) : null}
+              {preview.previewType === "pdf" && preview.fileUrl ? (
+                <iframe
+                  className="asset-preview-frame"
+                  src={brandAssetFileUrl(preview.fileUrl)}
+                  title={preview.name}
+                />
+              ) : null}
+              {preview.previewType === "text" ? (
+                <pre className="asset-preview-text">
+                  {preview.textPreview || "文件暂无可读取文本内容。"}
+                </pre>
+              ) : null}
+              {["metadata", "unknown"].includes(preview.previewType) ? (
+                <div className="asset-preview-empty">
+                  <p>
+                    {preview.fileExists
+                      ? "该文件类型暂不支持内嵌预览，可以下载后查看。"
+                      : "当前记录没有可访问的本地文件，展示资产元信息。"}
+                  </p>
+                  {preview.fileUrl ? (
+                    <a className="download" href={brandAssetFileUrl(preview.fileUrl)} rel="noreferrer" target="_blank">
+                      下载文件
+                    </a>
+                  ) : null}
+                  <pre>{JSON.stringify(preview.metadata ?? {}, null, 2)}</pre>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

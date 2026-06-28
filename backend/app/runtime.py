@@ -22,8 +22,9 @@ def reset_run(run_id: str) -> None:
 def sanitize_for_log(value: Any) -> Any:
     if isinstance(value, dict):
         if "image_url" in value:
-            url = str((value.get("image_url") or {}).get("url", ""))
-            return {"image_url": f"<image data url omitted, length={len(url)}>"}
+            image_url = value.get("image_url") or {}
+            url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
+            return {**value, "image_url": f"<image data url omitted, length={len(str(url))}>"}
         return {key: sanitize_for_log(item) for key, item in value.items()}
     if isinstance(value, list):
         return [sanitize_for_log(item) for item in value]

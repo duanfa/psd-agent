@@ -21,8 +21,10 @@ from sqlalchemy import (
     and_,
     create_engine,
     func,
+    inspect,
     or_,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from .defaults import load_workflow_defaults
@@ -124,6 +126,11 @@ class BrandRule(Base):
     layout_rules: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     components: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     prompt_templates: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    training_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_asset_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    website_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    base_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -235,6 +242,32 @@ def enabled() -> bool:
 def init_db() -> None:
     if engine is not None:
         Base.metadata.create_all(bind=engine)
+        _ensure_schema_upgrades()
+
+
+def _ensure_schema_upgrades() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "brand_rules" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("brand_rules")}
+    statements: list[str] = []
+    if "markdown" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN markdown LONGTEXT NULL")
+    if "training_prompt" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN training_prompt LONGTEXT NULL")
+    if "source_asset_ids" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN source_asset_ids JSON NULL")
+    if "website_urls" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN website_urls JSON NULL")
+    if "base_version" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN base_version VARCHAR(64) NULL")
+    if not statements:
+        return
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 @contextmanager
@@ -653,6 +686,81 @@ def get_brand_assets_page_data(
         }
 
 
+def create_brand(name: str, status: str = "active") -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        brand_name = name.strip()
+        if not brand_name:
+            raise ValueError("brand name is required")
+        existing = session.execute(select(Brand).where(Brand.name == brand_name)).scalar_one_or_none()
+        if existing is not None:
+            raise ValueError("brand name already exists")
+        row = Brand(name=brand_name, status=status.strip() or "active")
+        session.add(row)
+        session.flush()
+        return {
+            "id": row.id,
+            "name": row.name,
+            "status": row.status,
+            "assets": 0,
+        }
+
+
+def update_brand(brand_id: int, name: str, status: str = "active") -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        brand = session.get(Brand, brand_id)
+        if brand is None:
+            raise ValueError("brand not found")
+        brand_name = name.strip()
+        if not brand_name:
+            raise ValueError("brand name is required")
+        existing = session.execute(
+            select(Brand).where(Brand.name == brand_name, Brand.id != brand_id)
+        ).scalar_one_or_none()
+        if existing is not None:
+            raise ValueError("brand name already exists")
+        brand.name = brand_name
+        brand.status = status.strip() or "active"
+        brand.updated_at = datetime.utcnow()
+        asset_count = session.execute(
+            select(func.count(BrandAsset.id)).where(BrandAsset.brand_id == brand.id)
+        ).scalar_one()
+        return {
+            "id": brand.id,
+            "name": brand.name,
+            "status": brand.status,
+            "assets": asset_count,
+        }
+
+
+def delete_brand(brand_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        brand = session.get(Brand, brand_id)
+        if brand is None:
+            raise ValueError("brand not found")
+        brand_count = session.execute(select(func.count(Brand.id))).scalar_one()
+        if brand_count <= 1:
+            raise ValueError("at least one brand is required")
+        assets = list(session.execute(select(BrandAsset).where(BrandAsset.brand_id == brand_id)).scalars())
+        file_paths = [asset.saved_path for asset in assets if asset.saved_path]
+        for model in (BrandTrainingTask, BrandRule, Product):
+            for row in session.execute(select(model).where(model.brand_id == brand_id)).scalars():
+                session.delete(row)
+        for asset in assets:
+            session.delete(asset)
+        session.delete(brand)
+        return {
+            "id": brand_id,
+            "deletedAssets": len(assets),
+            "filePaths": file_paths,
+        }
+
+
 def create_brand_assets(
     brand_id: int,
     name: str,
@@ -701,11 +809,55 @@ def create_brand_assets(
         return created
 
 
+def delete_brand_asset(asset_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        asset = session.get(BrandAsset, asset_id)
+        if asset is None:
+            raise ValueError("asset not found")
+        result = {
+            "id": asset.id,
+            "brandId": asset.brand_id,
+            "savedPath": asset.saved_path or "",
+        }
+        session.delete(asset)
+        return result
+
+
+def get_brand_asset(asset_id: int) -> dict[str, Any] | None:
+    with session_scope() as session:
+        if session is None:
+            return None
+        asset = session.get(BrandAsset, asset_id)
+        if asset is None:
+            return None
+        brand = session.get(Brand, asset.brand_id) if asset.brand_id else None
+        return {
+            "id": asset.id,
+            "brandId": asset.brand_id,
+            "brandName": brand.name if brand else "",
+            "name": asset.name,
+            "folder": asset.folder,
+            "contentType": asset.content_type or "",
+            "size": asset.size,
+            "savedPath": asset.saved_path or "",
+            "source": asset.source or "",
+            "status": asset.status,
+            "extractedText": asset.extracted_text or "",
+            "metadata": asset.metadata_json or {},
+            "createdAt": asset.created_at.isoformat() if asset.created_at else None,
+        }
+
+
 def get_brand_rules_data() -> dict[str, Any] | None:
     return get_brand_rules_page_data()
 
 
-def get_brand_rules_page_data(brand_id: int | None = None) -> dict[str, Any] | None:
+def get_brand_rules_page_data(
+    brand_id: int | None = None,
+    version_id: int | None = None,
+) -> dict[str, Any] | None:
     with session_scope() as session:
         if session is None:
             return None
@@ -714,17 +866,54 @@ def get_brand_rules_page_data(brand_id: int | None = None) -> dict[str, Any] | N
         if not brands:
             return None
         selected_brand = next((brand for brand in brands if brand.id == brand_id), brands[0])
-        rule = session.execute(
-            select(BrandRule)
-            .where(BrandRule.brand_id == selected_brand.id)
-            .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
-        ).scalar_one_or_none()
+        if version_id:
+            rule = session.execute(
+                select(BrandRule).where(
+                    BrandRule.brand_id == selected_brand.id,
+                    BrandRule.id == version_id,
+                )
+            ).scalar_one_or_none()
+        else:
+            rule = session.execute(
+                select(BrandRule)
+                .where(BrandRule.brand_id == selected_brand.id)
+                .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        versions = [
+            {
+                "id": item.id,
+                "version": item.version,
+                "status": item.status,
+                "createdAt": item.created_at.isoformat() if item.created_at else None,
+                "baseVersion": item.base_version or "",
+            }
+            for item in session.execute(
+                select(BrandRule)
+                .where(BrandRule.brand_id == selected_brand.id)
+                .order_by(BrandRule.created_at.desc(), BrandRule.id.desc())
+            ).scalars()
+        ]
+        assets = [
+            {
+                "id": asset.id,
+                "name": asset.name,
+                "folder": asset.folder,
+                "status": asset.status,
+            }
+            for asset in session.execute(
+                select(BrandAsset)
+                .where(BrandAsset.brand_id == selected_brand.id)
+                .order_by(BrandAsset.created_at.desc(), BrandAsset.id.desc())
+            ).scalars()
+        ]
         brand_rows = []
         for brand in brands:
             latest_rule = session.execute(
                 select(BrandRule)
                 .where(BrandRule.brand_id == brand.id)
                 .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
             ).scalar_one_or_none()
             brand_rows.append(
                 {
@@ -750,8 +939,23 @@ def get_brand_rules_page_data(brand_id: int | None = None) -> dict[str, Any] | N
                 "layoutRules": [],
                 "components": [],
                 "promptTemplates": [],
+                "versions": versions,
+                "selectedVersionId": version_id,
+                "markdown": "",
+                "trainingPrompt": DEFAULT_BRAND_RULE_PROMPT,
+                "sourceAssets": assets,
+                "websiteUrls": [],
                 "emptyState": f"{selected_brand.name} 还没有品牌规则，请先上传品牌资产并发起训练。",
             }
+        version_id = rule.id
+        markdown = rule.markdown or _default_rule_markdown(
+            selected_brand.name,
+            rule.version,
+            rule.design_rules or [],
+            rule.layout_rules or [],
+            rule.prompt_templates or [],
+            rule.website_urls or [],
+        )
         return {
             "page": page,
             "brands": brand_rows,
@@ -766,8 +970,383 @@ def get_brand_rules_page_data(brand_id: int | None = None) -> dict[str, Any] | N
             "layoutRules": rule.layout_rules or [],
             "components": rule.components or [],
             "promptTemplates": rule.prompt_templates or [],
+            "versions": versions,
+            "selectedVersionId": version_id,
+            "markdown": markdown,
+            "trainingPrompt": rule.training_prompt or DEFAULT_BRAND_RULE_PROMPT,
+            "sourceAssets": assets,
+            "websiteUrls": rule.website_urls or [],
             "emptyState": "",
         }
+
+
+def _clip(value: str, limit: int = 180) -> str:
+    text_value = " ".join((value or "").split())
+    return text_value[:limit] + ("..." if len(text_value) > limit else "")
+
+
+def _prompt_focuses(prompt: str) -> list[str]:
+    mapping = [
+        ("色彩", ("色彩", "配色", "颜色", "主色", "辅助色")),
+        ("字体", ("字体", "字号", "字重", "排版")),
+        ("布局", ("布局", "结构", "模块", "版式", "栅格")),
+        ("组件", ("组件", "按钮", "卡片", "标签", "图标")),
+        ("文案语气", ("文案", "语气", "卖点", "标题", "口吻")),
+        ("禁用规则", ("禁止", "不要", "避免", "不可", "负面")),
+        ("详情页转化", ("详情页", "转化", "购买", "cta", "首屏")),
+    ]
+    lowered = prompt.lower()
+    focuses = [label for label, keywords in mapping if any(keyword.lower() in lowered for keyword in keywords)]
+    return focuses or ["视觉规范", "布局结构", "组件模式", "文案语气"]
+
+
+def _asset_rule_summary(asset: BrandAsset) -> dict[str, str]:
+    extracted = _clip(asset.extracted_text or "", 220)
+    metadata = asset.metadata_json or {}
+    original_name = metadata.get("original_name") if isinstance(metadata, dict) else ""
+    source = asset.source or original_name or "未知来源"
+    description = (
+        f"{asset.folder} / {asset.content_type or '未知类型'} / {source}。"
+        f"{'可解析内容：' + extracted if extracted else '暂无可解析文本，按文件类型和命名沉淀视觉约束。'}"
+    )
+    return {"title": asset.name, "description": description}
+
+
+def _merge_rule_lists(
+    base_items: list[dict[str, Any]] | None,
+    new_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*(base_items or []), *new_items]:
+        title = str(item.get("title") or "")
+        if title in seen:
+            continue
+        seen.add(title)
+        merged.append({"title": title, "description": str(item.get("description") or "")})
+    return merged
+
+
+def _build_trained_rule_content(
+    brand_name: str,
+    version: str,
+    assets: list[BrandAsset],
+    prompt: str,
+    website_urls: list[str],
+    base_rule: BrandRule | None,
+) -> dict[str, Any]:
+    asset_names = [asset.name for asset in assets]
+    folder_names = sorted({asset.folder for asset in assets})
+    focuses = _prompt_focuses(prompt)
+    source_assets = [_asset_rule_summary(asset) for asset in assets]
+    base_text = f"叠加历史版本 {base_rule.version}" if base_rule else "不叠加历史版本"
+    website_count = len([url for url in website_urls if url])
+    focus_text = "、".join(focuses)
+    source_text = "、".join(asset_names) or "未选择素材"
+    folder_text = "、".join(folder_names) or ("官网 URL" if website_count else "空白输入")
+
+    new_design_rules = [
+        {
+            "title": "训练输入策略",
+            "description": f"{base_text}，基于 {len(assets)} 个素材和 {website_count} 个官网 URL 生成 {version}。",
+        },
+        {
+            "title": "素材采样范围",
+            "description": f"本次选择素材：{source_text}。覆盖类型：{folder_text}。",
+        },
+        {
+            "title": "提示词聚焦方向",
+            "description": f"提示词要求优先沉淀 {focus_text}；原始提示词：{_clip(prompt, 220)}",
+        },
+        {
+            "title": "素材使用约束",
+            "description": "生成设计任务时优先复用已选素材体现出的视觉语言；未覆盖内容需要标注为待人工确认。",
+        },
+    ]
+    if any(focus == "禁用规则" for focus in focuses):
+        new_design_rules.append(
+            {
+                "title": "禁用与风险控制",
+                "description": "提示词包含禁用/避免类要求，输出前必须检查颜色、组件、文案是否触碰负向约束。",
+            }
+        )
+
+    new_layout_rules = [
+        {
+            "title": "训练版页面结构",
+            "description": f"围绕 {focus_text} 组织详情页模块，首屏先表达品牌识别，再进入卖点和参数。",
+        },
+        {
+            "title": "素材驱动布局",
+            "description": f"来自 {folder_text} 的素材优先决定图片比例、留白密度和模块节奏。",
+        },
+    ]
+    if "详情页转化" in focuses:
+        new_layout_rules.append(
+            {"title": "转化模块", "description": "在首屏、功能说明和结尾区域保留明确 CTA 与购买理由。"}
+        )
+
+    new_components = [
+        {
+            "title": f"{brand_name} {version} 素材卡片",
+            "description": f"用于展示本次勾选素材形成的视觉、字体、色彩和构图规则。",
+        },
+        {
+            "title": "训练提示词检查项",
+            "description": f"每次生成前检查是否覆盖：{focus_text}。",
+        },
+    ]
+
+    return {
+        "design_rules": _merge_rule_lists(base_rule.design_rules if base_rule else None, new_design_rules),
+        "layout_rules": _merge_rule_lists(base_rule.layout_rules if base_rule else None, new_layout_rules),
+        "components": _merge_rule_lists(base_rule.components if base_rule else None, new_components),
+        "source_assets": source_assets,
+    }
+
+
+def get_brand_rule_training_context(
+    brand_id: int,
+    asset_ids: list[int],
+    base_version_id: int | None = None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        brand = session.get(Brand, brand_id)
+        if brand is None:
+            raise ValueError("brand not found")
+        base_rule = session.get(BrandRule, base_version_id) if base_version_id else None
+        if base_rule is not None and base_rule.brand_id != brand_id:
+            raise ValueError("base version does not belong to brand")
+        assets = list(
+            session.execute(
+                select(BrandAsset).where(
+                    BrandAsset.brand_id == brand_id,
+                    BrandAsset.id.in_(asset_ids),
+                )
+            ).scalars()
+        )
+        return {
+            "brand": {"id": brand.id, "name": brand.name, "status": brand.status},
+            "baseRule": {
+                "id": base_rule.id,
+                "version": base_rule.version,
+                "markdown": base_rule.markdown or "",
+                "designRules": base_rule.design_rules or [],
+                "layoutRules": base_rule.layout_rules or [],
+                "components": base_rule.components or [],
+            }
+            if base_rule
+            else None,
+            "assets": [
+                {
+                    "id": asset.id,
+                    "name": asset.name,
+                    "folder": asset.folder,
+                    "contentType": asset.content_type or "",
+                    "source": asset.source or "",
+                    "size": asset.size,
+                    "savedPath": asset.saved_path or "",
+                    "extractedText": asset.extracted_text or "",
+                    "metadata": asset.metadata_json or {},
+                }
+                for asset in assets
+            ],
+        }
+
+
+def _normalize_rule_items(value: Any, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return fallback
+    items = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if title or description:
+            items.append({"title": title or "未命名规则", "description": description})
+    return items or fallback
+
+
+def _normalize_model_rule_content(
+    model_result: dict[str, Any],
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "design_rules": _normalize_rule_items(model_result.get("design_rules"), fallback["design_rules"]),
+        "layout_rules": _normalize_rule_items(model_result.get("layout_rules"), fallback["layout_rules"]),
+        "components": _normalize_rule_items(model_result.get("components"), fallback["components"]),
+        "source_assets": _normalize_rule_items(model_result.get("source_assets"), fallback["source_assets"]),
+        "markdown": str(model_result.get("markdown") or "").strip(),
+    }
+
+
+def train_brand_rule_version(
+    brand_id: int,
+    asset_ids: list[int],
+    prompt: str,
+    website_urls: list[str],
+    base_version_id: int | None = None,
+    model_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        brand = session.get(Brand, brand_id)
+        if brand is None:
+            raise ValueError("brand not found")
+        base_rule = session.get(BrandRule, base_version_id) if base_version_id else None
+        if base_rule is not None and base_rule.brand_id != brand_id:
+            raise ValueError("base version does not belong to brand")
+        version_count = session.execute(
+            select(func.count(BrandRule.id)).where(BrandRule.brand_id == brand_id)
+        ).scalar_one()
+        version = f"V1.{version_count + 4}"
+        assets = list(
+            session.execute(
+                select(BrandAsset).where(
+                    BrandAsset.brand_id == brand_id,
+                    BrandAsset.id.in_(asset_ids),
+                )
+            ).scalars()
+        )
+        generated = _build_trained_rule_content(
+            brand_name=brand.name,
+            version=version,
+            assets=assets,
+            prompt=prompt,
+            website_urls=website_urls,
+            base_rule=base_rule,
+        )
+        if model_result:
+            generated = _normalize_model_rule_content(model_result, generated)
+        design_rules = generated["design_rules"]
+        layout_rules = generated["layout_rules"]
+        components = generated["components"]
+        prompt_templates = [
+            {
+                "title": "详情页生成模板",
+                "description": f"必须结合 {len(assets)} 个勾选素材、训练提示词和官网信息生成详情页。",
+            },
+            {
+                "title": "官网规则提取模板",
+                "description": f"从 {len([url for url in website_urls if url])} 个官网 URL 中提取视觉调性、内容结构与品牌语气。",
+            },
+            {
+                "title": "叠加训练模板",
+                "description": (
+                    f"基于 {base_rule.version} 保留历史规则并追加本次素材结论。"
+                    if base_rule
+                    else "不叠加历史版本，直接根据本次素材和提示词创建全新规则。"
+                ),
+            },
+        ]
+        markdown = _default_rule_markdown(
+            brand.name,
+            version,
+            design_rules,
+            layout_rules,
+            prompt_templates,
+            website_urls,
+            training_prompt=prompt,
+            source_assets=generated["source_assets"],
+            base_version=base_rule.version if base_rule else None,
+        )
+        if base_rule and base_rule.markdown:
+            markdown = "\n\n".join(
+                [
+                    base_rule.markdown,
+                    "---",
+                    f"## {version} 叠加训练补充",
+                    _default_rule_markdown(
+                        brand.name,
+                        version,
+                        design_rules,
+                        layout_rules,
+                        prompt_templates,
+                        website_urls,
+                        training_prompt=prompt,
+                        source_assets=generated["source_assets"],
+                        base_version=base_rule.version,
+                    ),
+                ]
+            )
+        if generated.get("markdown"):
+            markdown = str(generated["markdown"])
+            if base_rule and base_rule.markdown:
+                markdown = "\n\n".join(
+                    [base_rule.markdown, "---", f"## {version} 多模态训练补充", markdown]
+                )
+        row = BrandRule(
+            brand_id=brand_id,
+            version=version,
+            status="draft",
+            rule_count=len(design_rules),
+            layout_count=len(layout_rules),
+            prompt_count=len(prompt_templates),
+            design_rules=design_rules,
+            layout_rules=layout_rules,
+            components=components,
+            prompt_templates=prompt_templates,
+            markdown=markdown,
+            training_prompt=prompt,
+            source_asset_ids=asset_ids,
+            website_urls=website_urls,
+            base_version=base_rule.version if base_rule else None,
+        )
+        session.add(row)
+        session.flush()
+        return {"id": row.id, "version": row.version, "markdown": row.markdown}
+
+
+def update_brand_rule_markdown(rule_id: int, markdown: str) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        rule = session.get(BrandRule, rule_id)
+        if rule is None:
+            raise ValueError("brand rule not found")
+        rule.markdown = markdown
+        rule.updated_at = datetime.utcnow()
+        session.merge(rule)
+        return {"id": rule.id, "version": rule.version, "markdown": rule.markdown}
+
+
+def get_brand_rule_options_data() -> dict[str, Any] | None:
+    with session_scope() as session:
+        if session is None:
+            return None
+        rows = session.execute(
+            select(BrandRule, Brand)
+            .join(Brand, BrandRule.brand_id == Brand.id)
+            .order_by(Brand.name.asc(), BrandRule.updated_at.desc(), BrandRule.id.desc())
+        ).all()
+        rules = []
+        for rule, brand in rows:
+            markdown = rule.markdown or _default_rule_markdown(
+                brand.name,
+                rule.version,
+                rule.design_rules or [],
+                rule.layout_rules or [],
+                rule.prompt_templates or [],
+                rule.website_urls or [],
+            )
+            rules.append(
+                {
+                    "id": rule.id,
+                    "brandId": brand.id,
+                    "brandName": brand.name,
+                    "version": rule.version,
+                    "status": rule.status,
+                    "ruleCount": rule.rule_count,
+                    "markdown": markdown,
+                    "updatedAt": rule.updated_at.isoformat() if rule.updated_at else None,
+                    "label": f"{brand.name} / {rule.version} / {rule.status}",
+                }
+            )
+        return {"rules": rules}
 
 
 def get_products_data() -> dict[str, Any] | None:
@@ -895,6 +1474,53 @@ DEFAULT_WORKFLOW_STAGES: list[dict[str, Any]] = [
     {"id": "design_score", "title": "Design Score", "icon": "check-circle"},
     {"id": "output_review", "title": "输出、审核与反馈", "icon": "check-circle"},
 ]
+
+DEFAULT_BRAND_RULE_PROMPT = (
+    "你是 BrandOS 的品牌规则训练 Agent。请基于勾选的品牌数字资产、历史规则版本和官网内容，"
+    "提取品牌视觉规范、布局结构、组件模式、文案语气和详情页生成约束。输出 Markdown，"
+    "要求可读、可审阅、可被设计师手动修改。"
+)
+
+
+def _default_rule_markdown(
+    brand_name: str,
+    version: str,
+    design_rules: list[dict[str, Any]],
+    layout_rules: list[dict[str, Any]],
+    prompt_templates: list[dict[str, Any]],
+    website_urls: list[str] | None = None,
+    training_prompt: str | None = None,
+    source_assets: list[dict[str, str]] | None = None,
+    base_version: str | None = None,
+) -> str:
+    lines = [
+        f"# {brand_name} 品牌规则 {version}",
+        "",
+        "## 训练输入",
+        f"- 叠加版本：{base_version or '不叠加，创建全新规则'}",
+    ]
+    if training_prompt:
+        lines.append(f"- 训练提示词：{_clip(training_prompt, 500)}")
+    if source_assets:
+        lines.extend(["", "## 所选素材摘要"])
+        for item in source_assets:
+            lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
+    lines.extend([
+        "",
+        "## 设计规则说明",
+    ])
+    for item in design_rules:
+        lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
+    lines.extend(["", "## 布局规则摘要"])
+    for item in layout_rules:
+        lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
+    lines.extend(["", "## Prompt 模板摘要"])
+    for item in prompt_templates:
+        lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
+    if website_urls:
+        lines.extend(["", "## 官网来源"])
+        lines.extend(f"- {url}" for url in website_urls if url)
+    return "\n".join(lines)
 
 
 def _set_setting(session: Session, key: str, value: Any) -> None:
@@ -1122,6 +1748,27 @@ def ensure_seed_data() -> None:
             )
 
         if aurora and session.execute(select(func.count(BrandRule.id))).scalar_one() == 0:
+            design_rules = [
+                {"title": "品牌调性", "description": "简洁、克制、带有科技家居感，强调自然光感与空间呼吸感。"},
+                {"title": "主色体系", "description": "主色以深蓝与暖白为核心，辅助色使用低饱和浅灰与淡金。"},
+                {"title": "字体规则", "description": "标题偏中黑，正文偏常规，强调信息层级与留白节奏。"},
+                {"title": "文案风格", "description": "标题短句、卖点拆分清晰，功能信息与场景利益点并行表达。"},
+            ]
+            layout_rules = [
+                {"title": "Hero 模块", "description": "左文案右大图，首屏突出核心卖点与场景视觉。"},
+                {"title": "Feature 模块", "description": "三列卡片结构，统一图文比例，适合功能点平铺表达。"},
+                {"title": "Parameter 模块", "description": "参数表横向排布，支持图标化表达和重点参数高亮。"},
+            ]
+            components = [
+                {"title": "标题区组件", "description": "支持品牌标题、副标题与简短卖点组合。"},
+                {"title": "卖点区组件", "description": "适合 3 到 4 个卖点并列展示。"},
+                {"title": "CTA 组件", "description": "强调行动按钮、利益点和促销信息的组合。"},
+            ]
+            prompt_templates = [
+                {"title": "详情页生成模板", "description": "适用于新品首发和常规详情页，默认输出 Hero / Feature / Scenario / CTA。"},
+                {"title": "场景图生成模板", "description": "强调家居氛围、自然光环境、产品主角突出、减少过度商业感。"},
+                {"title": "模块重生成模板", "description": "在保留品牌语言的前提下，对单个模块进行局部变体生成。"},
+            ]
             session.add(
                 BrandRule(
                     brand_id=aurora.id,
@@ -1130,27 +1777,20 @@ def ensure_seed_data() -> None:
                     rule_count=42,
                     layout_count=12,
                     prompt_count=18,
-                    design_rules=[
-                        {"title": "品牌调性", "description": "简洁、克制、带有科技家居感，强调自然光感与空间呼吸感。"},
-                        {"title": "主色体系", "description": "主色以深蓝与暖白为核心，辅助色使用低饱和浅灰与淡金。"},
-                        {"title": "字体规则", "description": "标题偏中黑，正文偏常规，强调信息层级与留白节奏。"},
-                        {"title": "文案风格", "description": "标题短句、卖点拆分清晰，功能信息与场景利益点并行表达。"},
-                    ],
-                    layout_rules=[
-                        {"title": "Hero 模块", "description": "左文案右大图，首屏突出核心卖点与场景视觉。"},
-                        {"title": "Feature 模块", "description": "三列卡片结构，统一图文比例，适合功能点平铺表达。"},
-                        {"title": "Parameter 模块", "description": "参数表横向排布，支持图标化表达和重点参数高亮。"},
-                    ],
-                    components=[
-                        {"title": "标题区组件", "description": "支持品牌标题、副标题与简短卖点组合。"},
-                        {"title": "卖点区组件", "description": "适合 3 到 4 个卖点并列展示。"},
-                        {"title": "CTA 组件", "description": "强调行动按钮、利益点和促销信息的组合。"},
-                    ],
-                    prompt_templates=[
-                        {"title": "详情页生成模板", "description": "适用于新品首发和常规详情页，默认输出 Hero / Feature / Scenario / CTA。"},
-                        {"title": "场景图生成模板", "description": "强调家居氛围、自然光环境、产品主角突出、减少过度商业感。"},
-                        {"title": "模块重生成模板", "description": "在保留品牌语言的前提下，对单个模块进行局部变体生成。"},
-                    ],
+                    design_rules=design_rules,
+                    layout_rules=layout_rules,
+                    components=components,
+                    prompt_templates=prompt_templates,
+                    markdown=_default_rule_markdown(
+                        aurora.name,
+                        "V1.4",
+                        design_rules,
+                        layout_rules,
+                        prompt_templates,
+                    ),
+                    training_prompt=DEFAULT_BRAND_RULE_PROMPT,
+                    source_asset_ids=[],
+                    website_urls=[],
                 )
             )
 

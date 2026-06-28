@@ -18,15 +18,17 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   API_BASE,
   artifactUrl,
   cancelWorkflow,
+  fetchBrandRuleOptions,
   fetchDefaults,
   fetchWorkflowLogs,
   generateWorkflow,
   type AgentPrompts,
+  type BrandRuleOption,
   type OutputType,
   type StageMeta,
   type WorkflowPayload,
@@ -69,12 +71,52 @@ const OUTPUT_LABELS: Record<OutputType, string> = {
 
 type ConfigSection = "model_config" | "typography" | "layout" | "prompts";
 
+const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
+
+interface WorkflowDraft {
+  payload: WorkflowPayload;
+  selectedBrandRuleId: number | "";
+  updatedAt: string;
+}
+
 function patchSection<K extends ConfigSection>(
   value: WorkflowPayload,
   section: K,
   patch: Partial<WorkflowPayload[K]>,
 ): WorkflowPayload {
   return { ...value, [section]: { ...value[section], ...patch } };
+}
+
+function readWorkflowDraft(): WorkflowDraft | null {
+  try {
+    const raw = window.localStorage.getItem(WORKFLOW_DRAFT_KEY);
+    if (!raw) return null;
+    const draft = JSON.parse(raw) as WorkflowDraft;
+    return draft?.payload ? { ...draft, payload: sanitizeWorkflowDraft(draft.payload) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeWorkflowDraft(payload: WorkflowPayload): WorkflowPayload {
+  return payload;
+}
+
+function mergeWorkflowDraft(defaultPayload: WorkflowPayload, draftPayload: WorkflowPayload): WorkflowPayload {
+  return {
+    ...defaultPayload,
+    ...draftPayload,
+    model_config: { ...defaultPayload.model_config, ...draftPayload.model_config },
+    typography: { ...defaultPayload.typography, ...draftPayload.typography },
+    layout: { ...defaultPayload.layout, ...draftPayload.layout },
+    prompts: { ...defaultPayload.prompts, ...draftPayload.prompts },
+    output_types: draftPayload.output_types?.length ? draftPayload.output_types : defaultPayload.output_types,
+  };
+}
+
+function formatDraftTime(value: string | null) {
+  if (!value) return "尚未保存草稿";
+  return `草稿已保存 ${new Date(value).toLocaleString("zh-CN", { hour12: false })}`;
 }
 
 export function PsdWorkflowApp() {
@@ -92,15 +134,66 @@ export function PsdWorkflowApp() {
   const [liveStages, setLiveStages] = useState<WorkflowResult["stages"]>([]);
   const [workflowLogs, setWorkflowLogs] = useState<string[]>([]);
   const [workflowLogStatus, setWorkflowLogStatus] = useState<string>("idle");
+  const [brandRules, setBrandRules] = useState<BrandRuleOption[]>([]);
+  const [brandRulesLoading, setBrandRulesLoading] = useState(false);
+  const [brandRulesError, setBrandRulesError] = useState<string | null>(null);
+  const [selectedBrandRuleId, setSelectedBrandRuleId] = useState<number | "">("");
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftMessage, setDraftMessage] = useState("正在检查草稿箱...");
+  const draftSaveTimer = useRef<number | null>(null);
+  const skipNextDraftSave = useRef(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchDefaults()
       .then((defaults) => {
-        setPayload(defaults.payload);
+        const draft = readWorkflowDraft();
+        setPayload(draft ? mergeWorkflowDraft(defaults.payload, draft.payload) : defaults.payload);
+        setSelectedBrandRuleId(draft?.selectedBrandRuleId ?? "");
+        setDraftMessage(draft ? formatDraftTime(draft.updatedAt) : "暂无草稿，编辑后会自动保存");
+        setDraftReady(true);
         if (defaults.stages?.length) setStages(defaults.stages);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady || !payload) return;
+    if (skipNextDraftSave.current) {
+      skipNextDraftSave.current = false;
+      return;
+    }
+    if (draftSaveTimer.current) window.clearTimeout(draftSaveTimer.current);
+    draftSaveTimer.current = window.setTimeout(() => {
+      const updatedAt = new Date().toISOString();
+      try {
+        window.localStorage.setItem(
+          WORKFLOW_DRAFT_KEY,
+          JSON.stringify({
+            payload: sanitizeWorkflowDraft(payload),
+            selectedBrandRuleId,
+            updatedAt,
+          }),
+        );
+        setDraftMessage(formatDraftTime(updatedAt));
+      } catch {
+        setDraftMessage("草稿保存失败，请检查浏览器存储空间");
+      }
+    }, 300);
+    return () => {
+      if (draftSaveTimer.current) window.clearTimeout(draftSaveTimer.current);
+    };
+  }, [draftReady, payload, selectedBrandRuleId]);
+
+  useEffect(() => {
+    setBrandRulesLoading(true);
+    fetchBrandRuleOptions()
+      .then((data) => {
+        setBrandRules(data.rules);
+        setBrandRulesError(null);
+      })
+      .catch((err) => setBrandRulesError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setBrandRulesLoading(false));
   }, []);
 
   const previewUrl = useMemo(
@@ -114,6 +207,11 @@ export function PsdWorkflowApp() {
   );
 
   const timelineStages = loading || liveStages.length ? liveStages : result?.stages ?? [];
+
+  const selectedBrandRule = useMemo(
+    () => brandRules.find((rule) => rule.id === selectedBrandRuleId),
+    [brandRules, selectedBrandRuleId],
+  );
 
   useEffect(() => {
     if (!currentRunId) return;
@@ -193,6 +291,19 @@ export function PsdWorkflowApp() {
     setPayload((c) =>
       c ? patchSection(c, "prompts", { [key]: value } as Partial<AgentPrompts>) : c,
     );
+
+  const applySelectedBrandRule = () => {
+    if (!selectedBrandRule) return;
+    setPayload((current) =>
+      current
+        ? {
+            ...current,
+            brand_name: selectedBrandRule.brandName,
+            brand_guidelines: selectedBrandRule.markdown,
+          }
+        : current,
+    );
+  };
 
   const toggleOutput = (type: OutputType) =>
     setPayload((c) => {
@@ -281,6 +392,7 @@ export function PsdWorkflowApp() {
             <Cpu size={14} />
             {payload.model_config.enable_deepagents ? "DeepAgents 开启" : "规则降级"}
           </span>
+          <span className="pill pill-ghost">{draftMessage}</span>
           <span className="pill pill-ghost">{API_BASE}</span>
         </div>
       </header>
@@ -372,13 +484,50 @@ export function PsdWorkflowApp() {
                   </select>
                 </Field>
               </div>
-                <Field label="Product Brief / 商品信息">
+              <Field label="Product Brief / 商品信息">
                 <textarea
                   value={payload.product_brief}
                   onChange={(e) => setField("product_brief", e.target.value)}
                 />
               </Field>
               <Field label="品牌规范 / Core Rule">
+                <div className="brand-rule-picker">
+                  <select
+                    value={selectedBrandRuleId}
+                    disabled={brandRulesLoading || brandRules.length === 0}
+                    onChange={(e) =>
+                      setSelectedBrandRuleId(e.target.value ? Number(e.target.value) : "")
+                    }
+                  >
+                    <option value="">
+                      {brandRulesLoading
+                        ? "正在加载品牌规则版本..."
+                        : brandRules.length
+                          ? "选择已训练的品牌规则版本"
+                          : "暂无已训练品牌规则"}
+                    </option>
+                    {brandRules.map((rule) => (
+                      <option key={rule.id} value={rule.id}>
+                        {rule.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn ghost brand-rule-apply"
+                    disabled={!selectedBrandRule}
+                    type="button"
+                    onClick={applySelectedBrandRule}
+                  >
+                    应用版本
+                  </button>
+                </div>
+                {selectedBrandRule ? (
+                  <p className="hint">
+                    将应用 {selectedBrandRule.brandName} / {selectedBrandRule.version} 到当前输入框。
+                  </p>
+                ) : brandRulesError ? (
+                  <p className="hint">{brandRulesError}</p>
+                ) : null}
                 <textarea
                   value={payload.brand_guidelines}
                   onChange={(e) => setField("brand_guidelines", e.target.value)}
@@ -733,6 +882,10 @@ export function PsdWorkflowApp() {
               onClick={() => {
                 setResult(null);
                 setError(null);
+                skipNextDraftSave.current = true;
+                setSelectedBrandRuleId("");
+                window.localStorage.removeItem(WORKFLOW_DRAFT_KEY);
+                setDraftMessage("草稿已清空，将使用默认配置");
                 fetchDefaults().then((d) => setPayload(d.payload)).catch(() => {});
               }}
             >
@@ -908,9 +1061,9 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="field">
+    <div className="field">
       <span className="field-label">{label}</span>
       {children}
-    </label>
+    </div>
   );
 }

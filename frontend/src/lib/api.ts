@@ -187,6 +187,24 @@ export interface BrandAssetsPageResponse {
   uploadForm: { name: string; folder: string; source: string };
 }
 
+export interface BrandAssetPreviewResponse {
+  id: number;
+  brandName: string;
+  name: string;
+  folder: string;
+  contentType: string;
+  size: number;
+  source: string;
+  status: string;
+  savedPath: string;
+  fileExists: boolean;
+  previewType: "image" | "pdf" | "text" | "metadata" | "unknown";
+  fileUrl: string;
+  textPreview: string;
+  metadata: Record<string, unknown>;
+  createdAt?: string | null;
+}
+
 export interface BrandRulesPageResponse {
   page: { title: string; subtitle: string };
   brands: Array<{ id: number; name: string; status: string; version: string; ruleCount: number }>;
@@ -196,7 +214,31 @@ export interface BrandRulesPageResponse {
   layoutRules: Array<{ title: string; description: string }>;
   components: Array<{ title: string; description: string }>;
   promptTemplates: Array<{ title: string; description: string }>;
+  versions: Array<{
+    id: number;
+    version: string;
+    status: string;
+    createdAt?: string | null;
+    baseVersion: string;
+  }>;
+  selectedVersionId?: number | null;
+  markdown: string;
+  trainingPrompt: string;
+  sourceAssets: Array<{ id: number; name: string; folder: string; status: string }>;
+  websiteUrls: string[];
   emptyState: string;
+}
+
+export interface BrandRuleOption {
+  id: number;
+  brandId: number;
+  brandName: string;
+  version: string;
+  status: string;
+  ruleCount: number;
+  markdown: string;
+  updatedAt?: string | null;
+  label: string;
 }
 
 export interface ProductsPageResponse {
@@ -266,17 +308,114 @@ export async function fetchBrandAssetsPageWithFilters(filters: {
   return fetchJson(`/api/pages/brand-assets${query ? `?${query}` : ""}`);
 }
 
+export async function createBrand(input: {
+  name: string;
+  status: string;
+}): Promise<{ id: number; name: string; status: string; assets: number }> {
+  const response = await fetch(`${API_BASE}/api/brands`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `创建品牌失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function updateBrand(input: {
+  id: number;
+  name: string;
+  status: string;
+}): Promise<{ id: number; name: string; status: string; assets: number }> {
+  const response = await fetch(`${API_BASE}/api/brands/${input.id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: input.name, status: input.status }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `更新品牌失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function deleteBrand(brandId: number): Promise<{ id: number; deletedAssets: number }> {
+  const response = await fetch(`${API_BASE}/api/brands/${brandId}`, { method: "DELETE" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `删除品牌失败：${response.status}`);
+  }
+  return response.json();
+}
+
 export async function fetchBrandRulesPage(): Promise<BrandRulesPageResponse> {
   return fetchJson("/api/pages/brand-rules");
 }
 
 export async function fetchBrandRulesPageWithFilters(filters: {
   brandId?: number;
+  versionId?: number;
 }): Promise<BrandRulesPageResponse> {
   const params = new URLSearchParams();
   if (filters.brandId) params.set("brand_id", String(filters.brandId));
+  if (filters.versionId) params.set("version_id", String(filters.versionId));
   const query = params.toString();
   return fetchJson(`/api/pages/brand-rules${query ? `?${query}` : ""}`);
+}
+
+export async function fetchBrandRuleOptions(): Promise<{ rules: BrandRuleOption[] }> {
+  return fetchJson("/api/brand-rules/options");
+}
+
+export async function trainBrandRules(input: {
+  brandId: number;
+  assetIds: number[];
+  prompt: string;
+  websiteUrls: string[];
+  baseVersionId?: number | null;
+  clientRunId?: string;
+  modelConfig?: ModelConfig;
+}): Promise<{ id: number; version: string; markdown: string }> {
+  const response = await fetch(`${API_BASE}/api/brand-rules/train`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      brand_id: input.brandId,
+      asset_ids: input.assetIds,
+      prompt: input.prompt,
+      website_urls: input.websiteUrls,
+      base_version_id: input.baseVersionId ?? null,
+      client_run_id: input.clientRunId ?? null,
+      model_config: input.modelConfig ?? null,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `训练规则失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchBrandRuleTrainLogs(runId: string): Promise<WorkflowLogsResponse> {
+  return fetchJson(`/api/brand-rules/train/${runId}/logs`);
+}
+
+export async function updateBrandRuleMarkdown(
+  ruleId: number,
+  markdown: string,
+): Promise<{ id: number; version: string; markdown: string }> {
+  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}/markdown`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ markdown }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `保存 Markdown 失败：${response.status}`);
+  }
+  return response.json();
 }
 
 export async function fetchProductsPage(): Promise<ProductsPageResponse> {
@@ -324,6 +463,23 @@ export async function uploadBrandAssets(input: {
     throw new Error(text || `资产上传失败：${response.status}`);
   }
   return response.json();
+}
+
+export async function fetchBrandAssetPreview(assetId: number): Promise<BrandAssetPreviewResponse> {
+  return fetchJson(`/api/brand-assets/${assetId}/preview`);
+}
+
+export async function deleteBrandAsset(assetId: number): Promise<{ id: number; brandId: number }> {
+  const response = await fetch(`${API_BASE}/api/brand-assets/${assetId}`, { method: "DELETE" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `删除资产失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export function brandAssetFileUrl(path: string): string {
+  return `${API_BASE}${path}`;
 }
 
 export async function generateWorkflow(

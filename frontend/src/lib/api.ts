@@ -420,7 +420,6 @@ export async function trainBrandRules(input: {
   websiteUrls: string[];
   baseVersionId?: number | null;
   clientRunId?: string;
-  modelConfig?: ModelConfig;
 }): Promise<{ id: number; version: string; markdown: string }> {
   const response = await fetch(`${API_BASE}/api/brand-rules/train`, {
     method: "POST",
@@ -432,7 +431,6 @@ export async function trainBrandRules(input: {
       website_urls: input.websiteUrls,
       base_version_id: input.baseVersionId ?? null,
       client_run_id: input.clientRunId ?? null,
-      model_config: input.modelConfig ?? null,
     }),
   });
   if (!response.ok) {

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import database
-from .defaults import load_model_test_config, load_workflow_defaults
+from .defaults import load_system_model_config, load_workflow_defaults
 from .llm import LLMClient, LLMUnavailable, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
@@ -31,7 +31,6 @@ class TrainBrandRuleRequest(BaseModel):
     website_urls: list[str] = []
     base_version_id: int | None = None
     client_run_id: str | None = None
-    training_model_config: dict[str, object] | None = Field(default=None, alias="model_config")
 
 
 class UpdateBrandRuleMarkdownRequest(BaseModel):
@@ -113,6 +112,7 @@ def config_defaults() -> dict[str, object]:
         database.ensure_seed_data()
         defaults = database.get_workflow_defaults_data() or load_workflow_defaults()
         stages = database.get_workflow_stages_data() or database.DEFAULT_WORKFLOW_STAGES
+    defaults = {**defaults, "model_config": load_system_model_config()}
     return {
         "payload": defaults,
         "prompts": defaults["prompts"],
@@ -126,7 +126,7 @@ def config_defaults() -> dict[str, object]:
 def model_test(payload: ModelTestRequest) -> ModelTestResponse:
     try:
         request = WorkflowRequest.model_validate(
-            _merge_payload({"model_config": load_model_test_config()})
+            _merge_payload({"model_config": load_system_model_config()})
         )
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -171,7 +171,7 @@ def model_test(payload: ModelTestRequest) -> ModelTestResponse:
 def model_test_config() -> ModelTestConfigResponse:
     try:
         request = WorkflowRequest.model_validate(
-            _merge_payload({"model_config": load_model_test_config()})
+            _merge_payload({"model_config": load_system_model_config()})
         )
     except (ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -292,20 +292,6 @@ def brand_rule_train_logs(run_id: str) -> dict[str, object]:
     return get_run_snapshot(run_id)
 
 
-def _merge_training_model_config(
-    base_config: dict[str, object],
-    override_config: dict[str, object] | None,
-) -> dict[str, object]:
-    merged = dict(base_config)
-    for key, value in (override_config or {}).items():
-        if key == "api_key" and not str(value or "").strip():
-            continue
-        if value is None:
-            continue
-        merged[key] = value
-    return merged
-
-
 def _brand_rule_model_result(
     run_id: str,
     payload: TrainBrandRuleRequest,
@@ -317,13 +303,6 @@ def _brand_rule_model_result(
         base_version_id=payload.base_version_id,
     )
     defaults = load_workflow_defaults()
-    defaults = {
-        **defaults,
-        "model_config": _merge_training_model_config(
-            defaults.get("model_config") if isinstance(defaults.get("model_config"), dict) else {},
-            payload.training_model_config,
-        ),
-    }
     request_defaults = WorkflowRequest.model_validate(defaults)
     settings = request_defaults.model_settings
     settings.enable_deepagents = True
@@ -505,6 +484,32 @@ def _extract_spreadsheet_text(path: Path) -> str | None:
             return path.read_text(encoding="gb18030", errors="ignore")[:16000]
         except Exception:
             return None
+    if suffix == ".xls":
+        try:
+            import xlrd  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            workbook = xlrd.open_workbook(str(path))
+            lines: list[str] = []
+            for sheet in workbook.sheets()[:6]:
+                lines.append(f"[Sheet] {sheet.name}")
+                count = 0
+                for row_idx in range(sheet.nrows):
+                    values = [
+                        str(value).strip()
+                        for value in sheet.row_values(row_idx)
+                        if value not in (None, "")
+                    ]
+                    if values:
+                        lines.append(" | ".join(values))
+                        count += 1
+                    if count >= 120:
+                        break
+            return "\n".join(lines)[:16000]
+        except Exception:
+            return None
     if suffix not in {".xlsx", ".xlsm"}:
         return None
     try:
@@ -530,7 +535,7 @@ def _extract_spreadsheet_text(path: Path) -> str | None:
         return None
 
 
-async def _save_assets(
+def _save_assets(
     files: list[UploadFile],
     input_dir: Path,
     bucket_override: str | None = None,
@@ -558,12 +563,15 @@ async def _save_assets(
 def _merge_payload(incoming: dict) -> dict:
     data = load_workflow_defaults()
     for key, value in incoming.items():
+        if key == "model_config":
+            continue
         if isinstance(data.get(key), dict) and isinstance(value, dict):
             merged = dict(data[key])
             merged.update(value)
             data[key] = merged
         else:
             data[key] = value
+    data["model_config"] = load_system_model_config()
     return data
 
 
@@ -578,7 +586,7 @@ async def upload_brand_assets(
     if not files:
         raise HTTPException(status_code=422, detail="请至少上传一个文件")
     media_dir = APP_ROOT / "media" / "brand-assets" / str(brand_id)
-    saved_assets = await _save_assets(files, media_dir, bucket_override="brand_asset")
+    saved_assets = _save_assets(files, media_dir, bucket_override="brand_asset")
     try:
         created = database.create_brand_assets(
             brand_id=brand_id,
@@ -658,7 +666,7 @@ def download_brand_asset_file(asset_id: int) -> FileResponse:
 
 
 @app.post("/api/workflows/generate", response_model=WorkflowResult)
-async def generate_workflow(
+def generate_workflow(
     payload: str = Form(...),
     client_run_id: str | None = Form(default=None),
     files: list[UploadFile] = File(default=[]),
@@ -679,9 +687,9 @@ async def generate_workflow(
     input_dir = run_dir / "inputs"
     output_dir = run_dir / "outputs"
     assets = [
-        *await _save_assets(files, input_dir / "assets"),
-        *await _save_assets(brief_files, input_dir / "brief", bucket_override="brief"),
-        *await _save_assets(
+        *_save_assets(files, input_dir / "assets"),
+        *_save_assets(brief_files, input_dir / "brief", bucket_override="brief"),
+        *_save_assets(
             reference_images,
             input_dir / "reference_images",
             bucket_override="reference_image",
@@ -692,8 +700,26 @@ async def generate_workflow(
         asset.extracted_text or "" for asset in assets if asset.extracted_text
     ).strip()
     if spreadsheet_text and spreadsheet_text not in request.product_brief:
+        parsed_brief_assets = [
+            {
+                "name": asset.name,
+                "bucket": asset.bucket,
+                "chars": len(asset.extracted_text or ""),
+            }
+            for asset in assets
+            if asset.extracted_text
+        ]
         request.product_brief = "\n\n".join(
             part for part in [request.product_brief, spreadsheet_text] if part
+        )
+        append_log(
+            run_id,
+            "Workflow",
+            "Brief Excel 已解析并追加到 brief",
+            {
+                "files": parsed_brief_assets,
+                "appended_chars": len(spreadsheet_text),
+            },
         )
 
     try:

@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "workflow-defaults.json"
 LOCAL_CONFIG_PATH = CONFIG_DIR / "workflow-defaults.local.json"
-MODEL_TEST_CONFIG_PATH = CONFIG_DIR / "workflow-gpt.json"
+SYSTEM_MODEL_CONFIG_PATH = CONFIG_DIR / "workflow-gpt.json"
 
 
 def default_workflow_payload() -> dict[str, Any]:
@@ -100,12 +100,14 @@ def load_workflow_defaults() -> dict[str, Any]:
     defaults = default_workflow_payload()
     file_defaults = _read_json(DEFAULT_CONFIG_PATH)
     local_overrides = _read_json(LOCAL_CONFIG_PATH)
-    return _deep_merge(_deep_merge(defaults, file_defaults), local_overrides)
+    merged = _deep_merge(_deep_merge(defaults, file_defaults), local_overrides)
+    merged["model_config"] = load_system_model_config()
+    return merged
 
 
-def load_model_test_config() -> dict[str, Any]:
-    defaults = load_workflow_defaults()
-    file_config = _read_json(MODEL_TEST_CONFIG_PATH)
+def load_system_model_config() -> dict[str, Any]:
+    defaults = default_workflow_payload()
+    file_config = _read_json(SYSTEM_MODEL_CONFIG_PATH)
     model_config = file_config.get("model_config")
     if isinstance(model_config, dict):
         return _deep_merge(defaults.get("model_config", {}), model_config)

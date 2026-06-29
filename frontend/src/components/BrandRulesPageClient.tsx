@@ -6,28 +6,14 @@ import {
   fetchBrandRulesPageWithFilters,
   trainBrandRules,
   type BrandRulesPageResponse,
-  type ModelConfig,
   updateBrandRuleMarkdown,
 } from "@/lib/api";
-
-const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
 
 function createClientRunId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
   return `brand-rule-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readPsdModelConfig(): ModelConfig | undefined {
-  try {
-    const raw = window.localStorage.getItem(WORKFLOW_DRAFT_KEY);
-    if (!raw) return undefined;
-    const draft = JSON.parse(raw) as { payload?: { model_config?: ModelConfig } };
-    return draft.payload?.model_config;
-  } catch {
-    return undefined;
-  }
 }
 
 export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesPageResponse }) {
@@ -128,7 +114,6 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
         websiteUrls: urls,
         baseVersionId: trainForm.useBaseVersion ? trainForm.baseVersionId : null,
         clientRunId: runId,
-        modelConfig: readPsdModelConfig(),
       });
       await pollLogs();
       setTrainOpen(false);

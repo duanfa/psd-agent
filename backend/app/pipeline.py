@@ -83,6 +83,14 @@ class PipelineContext:
         return [a.name for a in self.assets if a.bucket == "reference_image"]
 
     @property
+    def reference_image_paths(self) -> list[str]:
+        return [
+            a.saved_path
+            for a in self.assets
+            if a.bucket == "reference_image" and a.saved_path
+        ]
+
+    @property
     def image_paths(self) -> list[str]:
         return [
             a.saved_path
@@ -136,6 +144,29 @@ def _selling_points(ctx: PipelineContext) -> list[str]:
     if unique:
         return unique[:6]
     return ["轻量通勤", "多分区收纳", "防泼水面料", "简洁商务风格"]
+
+
+def _normalize_text_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = str(
+                item.get("title")
+                or item.get("name")
+                or item.get("point")
+                or item.get("label")
+                or item.get("description")
+                or item
+            ).strip()
+        else:
+            text = str(item).strip()
+        if text:
+            items.append(text)
+    return items
 
 
 # ----------------------------- 各阶段实现 -----------------------------
@@ -221,6 +252,7 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
                     "model": settings.vision_model,
                     "images": [Path(p).name for p in image_paths],
                 }
+                data["key_features"] = _normalize_text_items(data.get("key_features")) or _selling_points(ctx)
                 ctx.product_info = data
                 return data
             except LLMUnavailable as exc:
@@ -228,6 +260,7 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
 
         data = ctx.llm.invoke_json(req.prompts.vision_agent_prompt, prompt)
         data["_vision"] = {"mode": "text", "model": settings.model}
+        data["key_features"] = _normalize_text_items(data.get("key_features")) or _selling_points(ctx)
         ctx.product_info = data
         return data
 
@@ -250,7 +283,7 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
         return data
 
     def summarize(data: dict[str, Any], used: bool) -> str:
-        feats = "、".join(data.get("key_features", [])[:4])
+        feats = "、".join(_normalize_text_items(data.get("key_features"))[:4])
         mode = (data.get("_vision") or {}).get("mode")
         if not used:
             prefix = "按文件名/brief 规则推断"
@@ -283,6 +316,7 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
             "brand, product, audience, selling_points(数组), specifications(对象), scenarios(数组), design_focus。"
         )
         data = ctx.llm.invoke_json(req.prompts.structured_agent_prompt, prompt)
+        data["selling_points"] = _normalize_text_items(data.get("selling_points")) or _selling_points(ctx)
         ctx.structured_info = data
         return data
 
@@ -304,7 +338,7 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
         return data
 
     def summarize(data: dict[str, Any], used: bool) -> str:
-        points = "、".join(data.get("selling_points", [])[:4])
+        points = "、".join(_normalize_text_items(data.get("selling_points"))[:4])
         return f"统一商品结构已生成，核心卖点：{points}。"
 
     return _run_stage(
@@ -320,6 +354,7 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
 
 def stage_brand_rag(ctx: PipelineContext) -> StageResult:
     req = ctx.request
+    settings = req.model_settings
 
     def model_fn() -> dict[str, Any]:
         prompt = (
@@ -334,7 +369,24 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             "rule_weights(对象), drift_risks(数组), brand_style, primary_color, secondary_colors(数组), "
             "fonts(对象，含 title、body、english), layout_rules(数组), component_patterns(数组), prompt_templates(数组), module_order(数组)。"
         )
-        data = ctx.llm.invoke_json(req.prompts.brand_rag_agent_prompt, prompt)
+        reference_image_paths = ctx.reference_image_paths[: settings.max_vision_images]
+        if reference_image_paths and settings.enable_vision:
+            data = ctx.llm.invoke_vision_json(
+                req.prompts.brand_rag_agent_prompt,
+                prompt,
+                reference_image_paths,
+            )
+            data["_reference_vision"] = {
+                "mode": "multimodal",
+                "model": settings.vision_model,
+                "images": [Path(path).name for path in reference_image_paths],
+            }
+        else:
+            data = ctx.llm.invoke_json(req.prompts.brand_rag_agent_prompt, prompt)
+            data["_reference_vision"] = {
+                "mode": "text",
+                "images": ctx.reference_images,
+            }
         ctx.brand_profile = data
         return data
 

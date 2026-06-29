@@ -102,14 +102,28 @@ function readWorkflowDraft(): WorkflowDraft | null {
 }
 
 function sanitizeWorkflowDraft(payload: WorkflowPayload): WorkflowPayload {
-  return payload;
+  return {
+    ...payload,
+    model_config: {
+      provider: "",
+      model: "",
+      vision_model: "",
+      api_key: "",
+      base_url: "",
+      temperature: 0,
+      max_tokens: 0,
+      enable_deepagents: false,
+      enable_vision: false,
+      max_vision_images: 0,
+    },
+  };
 }
 
 function mergeWorkflowDraft(defaultPayload: WorkflowPayload, draftPayload: WorkflowPayload): WorkflowPayload {
   return {
     ...defaultPayload,
     ...draftPayload,
-    model_config: { ...defaultPayload.model_config, ...draftPayload.model_config },
+    model_config: { ...defaultPayload.model_config },
     typography: { ...defaultPayload.typography, ...draftPayload.typography },
     layout: { ...defaultPayload.layout, ...draftPayload.layout },
     prompts: { ...defaultPayload.prompts, ...draftPayload.prompts },
@@ -563,7 +577,7 @@ export function PsdWorkflowApp() {
               </Field>
               <div className="grid-2">
                 <Field label="Brief Excel 文件">
-                  <span className="mini-dropzone">
+                  <label className="mini-dropzone">
                     <Upload size={16} />
                     <span>上传商品 brief Excel</span>
                     <input
@@ -573,7 +587,7 @@ export function PsdWorkflowApp() {
                       type="file"
                       onChange={(e) => setBriefFiles(Array.from(e.target.files ?? []))}
                     />
-                  </span>
+                  </label>
                   {briefFiles.length ? (
                     <div className="chips">
                       {briefFiles.map((file) => (
@@ -588,7 +602,7 @@ export function PsdWorkflowApp() {
                   )}
                 </Field>
                 <Field label="参考案例图片">
-                  <span className="mini-dropzone">
+                  <label className="mini-dropzone">
                     <ImageIcon size={16} />
                     <span>上传参考页面 / 案例图</span>
                     <input
@@ -598,7 +612,7 @@ export function PsdWorkflowApp() {
                       type="file"
                       onChange={(e) => setReferenceImages(Array.from(e.target.files ?? []))}
                     />
-                  </span>
+                  </label>
                   {referenceImages.length ? (
                     <div className="chips">
                       {referenceImages.map((file) => (
@@ -664,28 +678,36 @@ export function PsdWorkflowApp() {
               </div>
             </Section>
 
-            <Section title="模型参数" description="Provider / 模型 / Key" icon={<Cpu size={16} />}>
+            <Section
+              title="模型参数"
+              description="统一由 config/workflow-gpt.json 管理，页面内只读展示"
+              icon={<Cpu size={16} />}
+            >
               <div className="grid-2">
                 <Field label="Provider">
                   <input
+                    disabled
                     value={payload.model_config.provider}
                     onChange={(e) => setModel("provider", e.target.value)}
                   />
                 </Field>
                 <Field label="文本模型">
                   <input
+                    disabled
                     value={payload.model_config.model}
                     onChange={(e) => setModel("model", e.target.value)}
                   />
                 </Field>
                 <Field label="视觉模型（多模态）">
                   <input
+                    disabled
                     value={payload.model_config.vision_model}
                     onChange={(e) => setModel("vision_model", e.target.value)}
                   />
                 </Field>
                 <Field label={`视觉最多读图 · ${payload.model_config.max_vision_images}`}>
                   <input
+                    disabled
                     max={12}
                     min={1}
                     type="range"
@@ -697,6 +719,7 @@ export function PsdWorkflowApp() {
                 </Field>
                 <Field label="Base URL">
                   <input
+                    disabled
                     value={payload.model_config.base_url ?? ""}
                     placeholder="OpenAI compatible 可选"
                     onChange={(e) => setModel("base_url", e.target.value)}
@@ -704,6 +727,7 @@ export function PsdWorkflowApp() {
                 </Field>
                 <Field label="API Key">
                   <input
+                    disabled
                     type="password"
                     value={payload.model_config.api_key ?? ""}
                     placeholder="可留空，后端读环境变量"
@@ -712,6 +736,7 @@ export function PsdWorkflowApp() {
                 </Field>
                 <Field label={`Temperature · ${payload.model_config.temperature}`}>
                   <input
+                    disabled
                     max={2}
                     min={0}
                     step={0.1}
@@ -722,6 +747,7 @@ export function PsdWorkflowApp() {
                 </Field>
                 <Field label="Max Tokens">
                   <input
+                    disabled
                     min={512}
                     step={512}
                     type="number"
@@ -730,8 +756,13 @@ export function PsdWorkflowApp() {
                   />
                 </Field>
               </div>
+              <p className="hint">
+                当前页面不会修改系统模型配置，所有大模型调用统一读取
+                `config/workflow-gpt.json` 的 `model_config`。
+              </p>
               <label className="switch">
                 <input
+                  disabled
                   checked={payload.model_config.enable_deepagents}
                   type="checkbox"
                   onChange={(e) => setModel("enable_deepagents", e.target.checked)}
@@ -741,6 +772,7 @@ export function PsdWorkflowApp() {
               </label>
               <label className="switch">
                 <input
+                  disabled
                   checked={payload.model_config.enable_vision}
                   type="checkbox"
                   onChange={(e) => setModel("enable_vision", e.target.checked)}

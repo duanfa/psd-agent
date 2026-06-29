@@ -10,6 +10,7 @@ import {
   Image as ImageIcon,
   Layers,
   Loader2,
+  MessageSquare,
   Palette,
   RefreshCw,
   ShieldCheck,
@@ -35,6 +36,7 @@ import {
   type WorkflowResult,
 } from "@/lib/api";
 import { PipelineRibbon } from "./PipelineRibbon";
+import { ModelTestPanel } from "./ModelTestPanel";
 import { Section } from "./Section";
 import { StageTimeline } from "./StageTimeline";
 
@@ -70,6 +72,7 @@ const OUTPUT_LABELS: Record<OutputType, string> = {
 };
 
 type ConfigSection = "model_config" | "typography" | "layout" | "prompts";
+type PageTab = "workflow" | "model-test";
 
 const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
 
@@ -140,6 +143,7 @@ export function PsdWorkflowApp() {
   const [selectedBrandRuleId, setSelectedBrandRuleId] = useState<number | "">("");
   const [draftReady, setDraftReady] = useState(false);
   const [draftMessage, setDraftMessage] = useState("正在检查草稿箱...");
+  const [activeTab, setActiveTab] = useState<PageTab>("workflow");
   const draftSaveTimer = useRef<number | null>(null);
   const skipNextDraftSave = useRef(true);
   const [error, setError] = useState<string | null>(null);
@@ -435,7 +439,25 @@ export function PsdWorkflowApp() {
         />
       </section>
 
-      <div className="shell">
+      <section className="tab-switch" aria-label="工作台功能切换">
+        <button
+          className={`tab-switch-button ${activeTab === "workflow" ? "active" : ""}`}
+          type="button"
+          onClick={() => setActiveTab("workflow")}
+        >
+          <Layers size={16} /> 工作流配置
+        </button>
+        <button
+          className={`tab-switch-button ${activeTab === "model-test" ? "active" : ""}`}
+          type="button"
+          onClick={() => setActiveTab("model-test")}
+        >
+          <MessageSquare size={16} /> 模型测试
+        </button>
+      </section>
+
+      {activeTab === "workflow" ? (
+        <div className="shell">
         <section className="panel config-panel">
           <div className="panel-header">
             <div className="panel-title">
@@ -1025,7 +1047,10 @@ export function PsdWorkflowApp() {
             ) : null}
           </div>
         </aside>
-      </div>
+        </div>
+      ) : (
+        <ModelTestPanel />
+      )}
     </main>
   );
 }

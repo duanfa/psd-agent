@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import database
-from .defaults import load_workflow_defaults
-from .llm import LLMClient, LLMUnavailable
+from .defaults import load_model_test_config, load_workflow_defaults
+from .llm import LLMClient, LLMUnavailable, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
 from .render import build_design_spec, write_artifacts
@@ -41,6 +41,35 @@ class UpdateBrandRuleMarkdownRequest(BaseModel):
 class BrandRequest(BaseModel):
     name: str
     status: str = "active"
+
+
+class ModelTestMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ModelTestRequest(BaseModel):
+    messages: list[ModelTestMessage] = Field(default_factory=list)
+
+
+class ModelTestConfigResponse(BaseModel):
+    provider: str
+    model: str
+    vision_model: str
+    base_url: str | None = None
+    temperature: float
+    max_tokens: int
+    enable_vision: bool
+    max_vision_images: int
+    has_api_key: bool = False
+    source_path: str
+
+
+class ModelTestResponse(BaseModel):
+    reply: str
+    provider: str
+    model: str
+    base_url: str | None = None
 
 app = FastAPI(title="BrandOS AI Design Platform", version="0.3.0")
 app.add_middleware(
@@ -91,6 +120,75 @@ def config_defaults() -> dict[str, object]:
         "outputTypes": ["detail_page", "figma_page", "psd_file", "main_image", "banner"],
         "stages": stages,
     }
+
+
+@app.post("/api/model-test", response_model=ModelTestResponse)
+def model_test(payload: ModelTestRequest) -> ModelTestResponse:
+    try:
+        request = WorkflowRequest.model_validate(
+            _merge_payload({"model_config": load_model_test_config()})
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    messages = [
+        {"role": item.role.strip(), "content": item.content.strip()}
+        for item in payload.messages
+        if item.content.strip()
+    ]
+    if not messages:
+        raise HTTPException(status_code=422, detail="messages 不能为空")
+    if not any(item["role"] == "user" for item in messages):
+        raise HTTPException(status_code=422, detail="至少提供一条 user 消息")
+
+    settings = request.model_settings
+    settings.enable_deepagents = True
+    run_id = f"model-test-{uuid.uuid4().hex[:12]}"
+    reset_run(run_id)
+    try:
+        database.persist_run_started(run_id, request, [])
+    except Exception as exc:
+        print(f"[DB] persist_run_started failed: {exc}", flush=True)
+    set_run_state(run_id, "running", "model_test", "模型可用性测试", "sparkles")
+    llm = LLMClient(settings, run_id=run_id)
+
+    try:
+        reply = llm.invoke_messages(messages)
+    except LLMUnavailable as exc:
+        set_run_state(run_id, "failed", None)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    set_run_state(run_id, "completed", None)
+
+    return ModelTestResponse(
+        reply=reply,
+        provider=settings.provider,
+        model=settings.model,
+        base_url=resolve_base_url(settings, settings.model),
+    )
+
+
+@app.get("/api/model-test/config", response_model=ModelTestConfigResponse)
+def model_test_config() -> ModelTestConfigResponse:
+    try:
+        request = WorkflowRequest.model_validate(
+            _merge_payload({"model_config": load_model_test_config()})
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    settings = request.model_settings
+    return ModelTestConfigResponse(
+        provider=settings.provider,
+        model=settings.model,
+        vision_model=settings.vision_model,
+        base_url=resolve_base_url(settings, settings.model),
+        temperature=settings.temperature,
+        max_tokens=settings.max_tokens,
+        enable_vision=settings.enable_vision,
+        max_vision_images=settings.max_vision_images,
+        has_api_key=bool(settings.api_key),
+        source_path="config/workflow-gpt.json",
+    )
 
 
 @app.get("/api/pages/dashboard")

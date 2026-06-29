@@ -28,7 +28,14 @@ def resolve_api_key(settings: ModelConfig) -> str | None:
 
 def resolve_base_url(settings: ModelConfig, model_name: str | None = None) -> str | None:
     if settings.base_url:
-        return settings.base_url
+        base_url = settings.base_url.rstrip("/")
+        if (
+            settings.provider == "openai"
+            and ".openai.azure.com" in base_url
+            and "/openai/" not in base_url
+        ):
+            return f"{base_url}/openai/v1"
+        return base_url
     if settings.provider == "openai":
         name = (model_name or settings.model or "").lower()
         if name.startswith(("qwen", "qwq")):
@@ -97,9 +104,12 @@ class LLMClient:
             "model": model_name,
             "model_provider": self.settings.provider,
             "temperature": self.settings.temperature,
-            "max_tokens": self.settings.max_tokens,
             "api_key": api_key,
         }
+        if self.settings.provider == "openai" and model_name.lower().startswith("gpt-5"):
+            kwargs["max_completion_tokens"] = self.settings.max_tokens
+        else:
+            kwargs["max_tokens"] = self.settings.max_tokens
         base_url = resolve_base_url(self.settings, model_name)
         if base_url:
             kwargs["base_url"] = base_url
@@ -116,27 +126,33 @@ class LLMClient:
         if self._vision_model is None:
             self._vision_model = self._build_model(self.settings.vision_model)
 
-    def invoke_text(self, system_prompt: str, user_prompt: str) -> str:
-        self.ensure_ready()
-        assert self._model is not None
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        append_log(self.run_id, "LLM", "发送给文本模型的信息", messages)
-        try:
-            response = self._model.invoke(messages)
-        except Exception as exc:  # pragma: no cover - 取决于模型服务
-            raise LLMUnavailable(f"模型调用失败：{exc}") from exc
+    def _stringify_response_content(self, response: Any) -> str:
         content = getattr(response, "content", None)
         if isinstance(content, list):
             content = "".join(
                 part.get("text", "") if isinstance(part, dict) else str(part)
                 for part in content
             )
-        result = str(content or "").strip()
+        return str(content or "").strip()
+
+    def invoke_messages(self, messages: list[dict[str, Any]]) -> str:
+        self.ensure_ready()
+        assert self._model is not None
+        append_log(self.run_id, "LLM", "发送给文本模型的信息", messages)
+        try:
+            response = self._model.invoke(messages)
+        except Exception as exc:  # pragma: no cover - 取决于模型服务
+            raise LLMUnavailable(f"模型调用失败：{exc}") from exc
+        result = self._stringify_response_content(response)
         append_log(self.run_id, "LLM", "文本模型返回内容", result)
         return result
+
+    def invoke_text(self, system_prompt: str, user_prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return self.invoke_messages(messages)
 
     def invoke_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         guidance = (
@@ -175,13 +191,7 @@ class LLMClient:
             response = self._vision_model.invoke(messages)
         except Exception as exc:  # pragma: no cover - 取决于模型服务
             raise LLMUnavailable(f"多模态模型调用失败：{exc}") from exc
-        text = getattr(response, "content", None)
-        if isinstance(text, list):
-            text = "".join(
-                part.get("text", "") if isinstance(part, dict) else str(part)
-                for part in text
-            )
-        result = str(text or "")
+        result = self._stringify_response_content(response)
         append_log(self.run_id, "LLM", "多模态模型返回内容", result)
         return _parse_json_object(result)
 

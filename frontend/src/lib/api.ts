@@ -14,6 +14,31 @@ export interface ModelConfig {
   max_vision_images: number;
 }
 
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ModelTestResponse {
+  reply: string;
+  provider: string;
+  model: string;
+  base_url?: string | null;
+}
+
+export interface ModelTestConfigResponse {
+  provider: string;
+  model: string;
+  vision_model: string;
+  base_url?: string | null;
+  temperature: number;
+  max_tokens: number;
+  enable_vision: boolean;
+  max_vision_images: number;
+  has_api_key: boolean;
+  source_path: string;
+}
+
 export interface TypographyConfig {
   title_font: string;
   subtitle_font: string;
@@ -283,6 +308,25 @@ export interface DesignTasksPageResponse {
 
 export async function fetchDefaults(): Promise<DefaultsResponse> {
   return fetchJson("/api/config/defaults");
+}
+
+export async function fetchModelTestConfig(): Promise<ModelTestConfigResponse> {
+  return fetchJson("/api/model-test/config");
+}
+
+export async function testModel(input: { messages: ChatMessage[] }): Promise<ModelTestResponse> {
+  const response = await fetch(`${API_BASE}/api/model-test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: input.messages,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `模型测试失败：${response.status}`);
+  }
+  return response.json();
 }
 
 export async function fetchDashboard(): Promise<DashboardResponse> {

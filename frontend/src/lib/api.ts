@@ -82,6 +82,21 @@ export interface AgentPrompts {
   psd_agent_prompt: string;
 }
 
+export interface RequirementConstraints {
+  preferred_module_order: string[];
+  required_modules: string[];
+  forbidden_modules: string[];
+  layout_constraints: string[];
+  visual_constraints: string[];
+  copy_constraints: string[];
+  asset_constraints: string[];
+  negative_constraints: string[];
+  reference_alignment: string;
+  apply_feedback_constraints: boolean;
+  feedback_scope: "none" | "same_product" | "same_brand" | "run";
+  feedback_run_id?: string | null;
+}
+
 export interface WorkflowPayload {
   project_name: string;
   brand_name: string;
@@ -96,6 +111,7 @@ export interface WorkflowPayload {
   model_config: ModelConfig;
   typography: TypographyConfig;
   layout: LayoutConfig;
+  requirement_constraints: RequirementConstraints;
   prompts: AgentPrompts;
 }
 

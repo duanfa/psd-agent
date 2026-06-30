@@ -2193,6 +2193,154 @@ def list_design_feedback(run_id: str) -> dict[str, Any]:
         }
 
 
+def _empty_feedback_constraints(scope: str, feedback_run_id: str | None = None) -> dict[str, Any]:
+    return {
+        "applied": False,
+        "scope": scope,
+        "feedback_run_id": feedback_run_id,
+        "source_feedback_ids": [],
+        "source_run_ids": [],
+        "layout_constraints": [],
+        "visual_constraints": [],
+        "copy_constraints": [],
+        "asset_constraints": [],
+        "negative_constraints": [],
+        "general_notes": [],
+    }
+
+
+def _split_feedback_notes(notes: str) -> list[str]:
+    text = (
+        notes.replace("\r", "\n")
+        .replace("；", "\n")
+        .replace(";", "\n")
+        .replace("。", "\n")
+    )
+    items: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip(" -•·\t")
+        if line:
+            items.append(line)
+    return items
+
+
+def _classify_feedback_note(note: str) -> str:
+    lowered = note.lower()
+    if any(
+        keyword in note
+        for keyword in ("首屏", "模块", "布局", "排版", "顺序", "结构", "留白", "栅格", "对齐")
+    ):
+        return "layout"
+    if any(
+        keyword in note
+        for keyword in ("图片", "主图", "场景", "素材", "模特", "抠图", "细节图", "特写")
+    ):
+        return "asset"
+    if any(
+        keyword in note
+        for keyword in ("文案", "标题", "副标题", "正文", "要点", "措辞", "语气")
+    ):
+        return "copy"
+    if any(
+        keyword in note
+        for keyword in ("颜色", "配色", "字体", "字号", "字重", "阴影", "质感", "饱和", "明度")
+    ):
+        return "visual"
+    if any(keyword in lowered for keyword in ("avoid", "don't", "remove", "forbid")):
+        return "negative"
+    return "general"
+
+
+def _push_feedback_constraint(bucket: dict[str, list[str]], key: str, value: str) -> None:
+    text = value.strip()
+    if not text:
+        return
+    current = bucket.setdefault(key, [])
+    if text not in current:
+        current.append(text)
+
+
+def get_feedback_constraints_for_request(
+    brand_name: str,
+    product_name: str,
+    feedback_scope: str = "same_product",
+    feedback_run_id: str | None = None,
+    limit: int = 6,
+) -> dict[str, Any]:
+    scope = (feedback_scope or "same_product").strip()
+    if scope == "none":
+        return _empty_feedback_constraints(scope, feedback_run_id)
+
+    with session_scope() as session:
+        if session is None:
+            return _empty_feedback_constraints(scope, feedback_run_id)
+
+        query = (
+            select(DesignFeedback, WorkflowRun)
+            .join(WorkflowRun, DesignFeedback.run_id == WorkflowRun.run_id)
+            .order_by(DesignFeedback.created_at.desc(), DesignFeedback.id.desc())
+        )
+        if feedback_run_id:
+            query = query.where(DesignFeedback.run_id == feedback_run_id)
+        elif scope == "same_brand":
+            query = query.where(WorkflowRun.brand_name == brand_name)
+        else:
+            query = query.where(
+                WorkflowRun.brand_name == brand_name,
+                WorkflowRun.product_name == product_name,
+            )
+        rows = list(session.execute(query.limit(max(1, limit))).all())
+        if not rows:
+            return _empty_feedback_constraints(scope, feedback_run_id)
+
+        result = _empty_feedback_constraints(scope, feedback_run_id)
+        buckets: dict[str, list[str]] = {
+            "layout": [],
+            "visual": [],
+            "copy": [],
+            "asset": [],
+            "negative": [],
+            "general": [],
+        }
+        for feedback, run in rows:
+            result["source_feedback_ids"].append(feedback.id)
+            if run.run_id not in result["source_run_ids"]:
+                result["source_run_ids"].append(run.run_id)
+            for item in _split_feedback_notes(feedback.notes or ""):
+                bucket = _classify_feedback_note(item)
+                _push_feedback_constraint(buckets, bucket, item)
+            for change in feedback.changes or []:
+                tracked = change.get("trackedChanges") or []
+                if not isinstance(tracked, list):
+                    continue
+                for item in tracked:
+                    text = str(item).strip()
+                    if not text:
+                        continue
+                    bucket = _classify_feedback_note(text)
+                    prefix = "优先修正：" if bucket != "general" else "关注点："
+                    _push_feedback_constraint(buckets, bucket, f"{prefix}{text}")
+
+        result["layout_constraints"] = buckets["layout"]
+        result["visual_constraints"] = buckets["visual"]
+        result["copy_constraints"] = buckets["copy"]
+        result["asset_constraints"] = buckets["asset"]
+        result["negative_constraints"] = buckets["negative"]
+        result["general_notes"] = buckets["general"]
+        result["applied"] = any(
+            result[key]
+            for key in (
+                "layout_constraints",
+                "visual_constraints",
+                "copy_constraints",
+                "asset_constraints",
+                "negative_constraints",
+                "general_notes",
+            )
+        )
+        return result
+
+
 def delete_brand_rule_version(rule_id: int) -> dict[str, Any]:
     with session_scope() as session:
         if session is None:

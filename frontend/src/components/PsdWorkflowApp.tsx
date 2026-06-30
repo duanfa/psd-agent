@@ -33,6 +33,7 @@ import {
   type AgentPrompts,
   type BrandRuleOption,
   type OutputType,
+  type RequirementConstraints,
   type StageMeta,
   type WorkflowPayload,
   type WorkflowResult,
@@ -74,7 +75,12 @@ const OUTPUT_LABELS: Record<OutputType, string> = {
   banner: "广告 Banner",
 };
 
-type ConfigSection = "model_config" | "typography" | "layout" | "prompts";
+type ConfigSection =
+  | "model_config"
+  | "typography"
+  | "layout"
+  | "requirement_constraints"
+  | "prompts";
 type PageTab = "workflow" | "model-test";
 
 const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
@@ -131,9 +137,24 @@ function mergeWorkflowDraft(defaultPayload: WorkflowPayload, draftPayload: Workf
     model_config: { ...defaultPayload.model_config },
     typography: { ...defaultPayload.typography, ...draftPayload.typography },
     layout: { ...defaultPayload.layout, ...draftPayload.layout },
+    requirement_constraints: {
+      ...defaultPayload.requirement_constraints,
+      ...draftPayload.requirement_constraints,
+    },
     prompts: { ...defaultPayload.prompts, ...draftPayload.prompts },
     output_types: draftPayload.output_types?.length ? draftPayload.output_types : defaultPayload.output_types,
   };
+}
+
+function splitLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function joinLines(value: string[] | undefined): string {
+  return (value ?? []).join("\n");
 }
 
 function formatDraftTime(value: string | null) {
@@ -346,6 +367,18 @@ export function PsdWorkflowApp() {
         ? patchSection(c, "layout", {
             [key]: value,
           } as Partial<WorkflowPayload["layout"]>)
+        : c,
+    );
+
+  const setRequirementConstraint = (
+    key: keyof RequirementConstraints,
+    value: RequirementConstraints[keyof RequirementConstraints],
+  ) =>
+    setPayload((c) =>
+      c
+        ? patchSection(c, "requirement_constraints", {
+            [key]: value,
+          } as Partial<RequirementConstraints>)
         : c,
     );
 
@@ -1026,6 +1059,132 @@ export function PsdWorkflowApp() {
                   />
                 </Field>
               </div>
+            </Section>
+
+            <Section
+              title="结构化需求约束"
+              description="让生成优先遵守你的模块顺序、视觉要求和历史反馈"
+              icon={<ClipboardCheck size={16} />}
+            >
+              <div className="grid-2">
+                <Field label="偏好模块顺序（每行一个，如 Hero / Scenario / CTA）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.preferred_module_order)}
+                    onChange={(e) =>
+                      setRequirementConstraint(
+                        "preferred_module_order",
+                        splitLines(e.target.value),
+                      )
+                    }
+                  />
+                </Field>
+                <Field label="必须保留的模块（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.required_modules)}
+                    onChange={(e) =>
+                      setRequirementConstraint("required_modules", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="禁止出现的模块（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.forbidden_modules)}
+                    onChange={(e) =>
+                      setRequirementConstraint("forbidden_modules", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="参考对齐说明">
+                  <textarea
+                    value={payload.requirement_constraints.reference_alignment}
+                    onChange={(e) =>
+                      setRequirementConstraint("reference_alignment", e.target.value)
+                    }
+                  />
+                </Field>
+                <Field label="布局约束（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.layout_constraints)}
+                    onChange={(e) =>
+                      setRequirementConstraint("layout_constraints", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="视觉约束（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.visual_constraints)}
+                    onChange={(e) =>
+                      setRequirementConstraint("visual_constraints", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="文案约束（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.copy_constraints)}
+                    onChange={(e) =>
+                      setRequirementConstraint("copy_constraints", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="素材约束（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.asset_constraints)}
+                    onChange={(e) =>
+                      setRequirementConstraint("asset_constraints", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="负面约束 / 禁止项（每行一个）">
+                  <textarea
+                    value={joinLines(payload.requirement_constraints.negative_constraints)}
+                    onChange={(e) =>
+                      setRequirementConstraint("negative_constraints", splitLines(e.target.value))
+                    }
+                  />
+                </Field>
+                <Field label="反馈约束来源">
+                  <select
+                    value={payload.requirement_constraints.feedback_scope}
+                    onChange={(e) =>
+                      setRequirementConstraint(
+                        "feedback_scope",
+                        e.target.value as RequirementConstraints["feedback_scope"],
+                      )
+                    }
+                  >
+                    <option value="none">不注入历史反馈</option>
+                    <option value="same_product">注入同品牌同商品历史反馈</option>
+                    <option value="same_brand">注入同品牌最近反馈</option>
+                    <option value="run">仅注入指定 Run ID 反馈</option>
+                  </select>
+                </Field>
+                <Field label="反馈 Run ID（可选）">
+                  <input
+                    value={payload.requirement_constraints.feedback_run_id ?? ""}
+                    placeholder="指定历史 run_id 时填写"
+                    onChange={(e) =>
+                      setRequirementConstraint(
+                        "feedback_run_id",
+                        e.target.value.trim() || null,
+                      )
+                    }
+                  />
+                </Field>
+              </div>
+              <label className="switch">
+                <input
+                  checked={payload.requirement_constraints.apply_feedback_constraints}
+                  type="checkbox"
+                  onChange={(e) =>
+                    setRequirementConstraint("apply_feedback_constraints", e.target.checked)
+                  }
+                />
+                <span className="switch-track" />
+                将历史反馈自动转成下一次生成约束
+              </label>
+              <p className="hint">
+                `strict_brand` 模式下，如果结构化约束与已选规则冲突，系统会直接报错，不再静默回退到默认模板。
+              </p>
             </Section>
 
             <Section

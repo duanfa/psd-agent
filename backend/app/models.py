@@ -91,6 +91,21 @@ class AgentPrompts(BaseModel):
     psd_agent_prompt: str
 
 
+class RequirementConstraints(BaseModel):
+    preferred_module_order: list[str] = Field(default_factory=list)
+    required_modules: list[str] = Field(default_factory=list)
+    forbidden_modules: list[str] = Field(default_factory=list)
+    layout_constraints: list[str] = Field(default_factory=list)
+    visual_constraints: list[str] = Field(default_factory=list)
+    copy_constraints: list[str] = Field(default_factory=list)
+    asset_constraints: list[str] = Field(default_factory=list)
+    negative_constraints: list[str] = Field(default_factory=list)
+    reference_alignment: str = ""
+    apply_feedback_constraints: bool = True
+    feedback_scope: Literal["none", "same_product", "same_brand", "run"] = "same_product"
+    feedback_run_id: str | None = None
+
+
 class WorkflowRequest(BaseModel):
     project_name: str = "详情页自动生成"
     brand_name: str = "ANKORAU × ANAR FC"
@@ -110,6 +125,9 @@ class WorkflowRequest(BaseModel):
     )
     typography: TypographyConfig = Field(default_factory=TypographyConfig)
     layout: LayoutConfig = Field(default_factory=LayoutConfig)
+    requirement_constraints: RequirementConstraints = Field(
+        default_factory=RequirementConstraints
+    )
     prompts: AgentPrompts
 
     class Config:

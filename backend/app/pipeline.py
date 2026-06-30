@@ -77,6 +77,9 @@ class PipelineContext:
     core_rule: dict[str, Any] = field(default_factory=dict)
     detail_page_rule: dict[str, Any] = field(default_factory=dict)
     layout_blueprint: list[dict[str, Any]] = field(default_factory=list)
+    requirement_constraints: dict[str, Any] = field(default_factory=dict)
+    feedback_constraints: dict[str, Any] = field(default_factory=dict)
+    effective_constraints: dict[str, Any] = field(default_factory=dict)
 
     @property
     def images(self) -> list[str]:
@@ -109,6 +112,10 @@ class PipelineContext:
     @property
     def fonts(self) -> list[str]:
         return [a.name for a in self.assets if a.bucket == "font"]
+
+    @property
+    def strict_mode(self) -> bool:
+        return self.request.workflow_mode.value == "strict_brand"
 
     def check_cancelled(self, checkpoint: str) -> None:
         if self.cancel_checker():
@@ -177,6 +184,95 @@ def _normalize_text_items(value: Any) -> list[str]:
     return items
 
 
+def _clean_constraint_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for raw in value:
+        text = str(raw).strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _merge_effective_constraints(
+    requirement_constraints: dict[str, Any],
+    feedback_constraints: dict[str, Any],
+) -> dict[str, Any]:
+    merged = {
+        "preferred_module_order": _clean_constraint_items(
+            requirement_constraints.get("preferred_module_order")
+        ),
+        "required_modules": _clean_constraint_items(
+            requirement_constraints.get("required_modules")
+        ),
+        "forbidden_modules": _clean_constraint_items(
+            requirement_constraints.get("forbidden_modules")
+        ),
+        "layout_constraints": _clean_constraint_items(
+            requirement_constraints.get("layout_constraints")
+        ),
+        "visual_constraints": _clean_constraint_items(
+            requirement_constraints.get("visual_constraints")
+        ),
+        "copy_constraints": _clean_constraint_items(
+            requirement_constraints.get("copy_constraints")
+        ),
+        "asset_constraints": _clean_constraint_items(
+            requirement_constraints.get("asset_constraints")
+        ),
+        "negative_constraints": _clean_constraint_items(
+            requirement_constraints.get("negative_constraints")
+        ),
+        "reference_alignment": str(requirement_constraints.get("reference_alignment") or "").strip(),
+        "feedback_constraints_applied": False,
+        "feedback_source_run_ids": [],
+    }
+    if not requirement_constraints.get("apply_feedback_constraints", True):
+        return merged
+    for key in (
+        "layout_constraints",
+        "visual_constraints",
+        "copy_constraints",
+        "asset_constraints",
+        "negative_constraints",
+    ):
+        for item in _clean_constraint_items(feedback_constraints.get(key)):
+            if item not in merged[key]:
+                merged[key].append(item)
+    for item in _clean_constraint_items(feedback_constraints.get("general_notes")):
+        if item not in merged["layout_constraints"]:
+            merged["layout_constraints"].append(item)
+    merged["feedback_constraints_applied"] = bool(feedback_constraints.get("applied"))
+    merged["feedback_source_run_ids"] = _clean_constraint_items(
+        feedback_constraints.get("source_run_ids")
+    )
+    return merged
+
+
+def _constraint_prompt_payload(ctx: PipelineContext) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in ctx.effective_constraints.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _constraint_prompt_block(ctx: PipelineContext) -> str:
+    payload = _constraint_prompt_payload(ctx)
+    if not payload and not ctx.strict_mode:
+        return ""
+    lines: list[str] = []
+    if payload:
+        lines.append(f"结构化需求约束：{json.dumps(payload, ensure_ascii=False)}")
+    if ctx.strict_mode:
+        lines.append(
+            "当前为 strict_brand 模式：优先满足命中的品牌规则、详情页规则和结构化需求约束，"
+            "不要退回通用模板，不要擅自改写模块顺序。"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _rule_list(rule: dict[str, Any], snake_key: str, camel_key: str) -> list[dict[str, Any]]:
     value = rule.get(snake_key)
     if value is None:
@@ -240,6 +336,24 @@ def _role_display_name(role: str) -> str:
     }.get(role, "内容模块")
 
 
+def _normalize_module_token(value: str) -> str:
+    text = value.strip()
+    lowered = text.lower().replace("-", "_").replace(" ", "_")
+    aliases = [
+        ("hero", ("hero", "首屏", "头图", "主视觉", "banner", "kv")),
+        ("feature", ("feature", "卖点", "亮点", "优势", "功能")),
+        ("technology", ("technology", "工艺", "技术", "结构", "细节")),
+        ("scenario", ("scenario", "场景", "使用场景", "scene")),
+        ("parameter", ("parameter", "参数", "规格", "对比", "数据")),
+        ("brand_story", ("brand_story", "brandstory", "品牌故事", "品牌")),
+        ("cta", ("cta", "行动", "购买", "转化", "下单")),
+    ]
+    for role, keywords in aliases:
+        if any(keyword in lowered or keyword in text for keyword in keywords):
+            return role
+    return lowered
+
+
 def _default_layout_blueprint(count: int) -> list[dict[str, Any]]:
     templates = _FALLBACK_MODULE_TEMPLATES[:count]
     return [
@@ -254,9 +368,141 @@ def _default_layout_blueprint(count: int) -> list[dict[str, Any]]:
     ]
 
 
-def _build_layout_blueprint(detail_page_rule: dict[str, Any], count: int) -> list[dict[str, Any]]:
+def _fallback_blueprint_item(role: str, index: int) -> dict[str, Any]:
+    for _, title, layout, template_role in _FALLBACK_MODULE_TEMPLATES:
+        if template_role == role:
+            return {
+                "name": title,
+                "layer_group": f"{index:02d}_{role.title().replace('_', '')}",
+                "layout": layout,
+                "role": role,
+                "image_role": "主视觉图" if role == "hero" else f"{title}参考图",
+            }
+    return {
+        "name": _role_display_name(role),
+        "layer_group": f"{index:02d}_{role.title().replace('_', '')}",
+        "layout": "left_text_right_image",
+        "role": role,
+        "image_role": f"{_role_display_name(role)}参考图",
+    }
+
+
+def _renumber_blueprint(blueprint: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(blueprint, start=1):
+        role = str(item.get("role") or _infer_module_role(str(item.get("name") or ""), index - 1))
+        normalized.append(
+            {
+                **item,
+                "role": role,
+                "layer_group": f"{index:02d}_{role.title().replace('_', '')}",
+                "name": str(item.get("name") or _role_display_name(role)),
+                "image_role": str(
+                    item.get("image_role") or ("主视觉图" if role == "hero" else f"{_role_display_name(role)}参考图")
+                ),
+            }
+        )
+    return normalized
+
+
+def _apply_requirement_constraints_to_blueprint(
+    blueprint: list[dict[str, Any]],
+    count: int,
+    constraints: dict[str, Any],
+    strict_mode: bool,
+) -> list[dict[str, Any]]:
+    if not constraints:
+        return _renumber_blueprint(blueprint[:count])
+
+    preferred = [_normalize_module_token(item) for item in constraints.get("preferred_module_order") or []]
+    required = [_normalize_module_token(item) for item in constraints.get("required_modules") or []]
+    forbidden = {
+        _normalize_module_token(item) for item in constraints.get("forbidden_modules") or []
+    }
+    remaining = [dict(item) for item in blueprint]
+    selected: list[dict[str, Any]] = []
+
+    def take_item(token: str) -> dict[str, Any] | None:
+        for index, item in enumerate(remaining):
+            role = _normalize_module_token(str(item.get("role") or item.get("name") or ""))
+            name = _normalize_module_token(str(item.get("name") or ""))
+            if token in {role, name}:
+                return remaining.pop(index)
+        if token in {"hero", "feature", "technology", "scenario", "parameter", "brand_story", "cta"}:
+            return _fallback_blueprint_item(token, len(selected) + 1)
+        return None
+
+    for token in preferred:
+        if token in forbidden:
+            continue
+        item = take_item(token)
+        if item:
+            selected.append(item)
+
+    for token in required:
+        if token in forbidden:
+            continue
+        if any(_normalize_module_token(str(item.get("role") or item.get("name") or "")) == token for item in selected):
+            continue
+        item = take_item(token)
+        if item:
+            selected.append(item)
+
+    for item in list(remaining):
+        role = _normalize_module_token(str(item.get("role") or item.get("name") or ""))
+        if role in forbidden:
+            continue
+        selected.append(item)
+
+    if strict_mode and preferred:
+        missing_preferred = [
+            token
+            for token in preferred
+            if token not in {
+                _normalize_module_token(str(item.get("role") or item.get("name") or ""))
+                for item in selected
+            }
+        ]
+        if missing_preferred:
+            raise ValueError(
+                "strict_brand 模式下，当前规则无法命中需求指定的模块顺序："
+                + "、".join(missing_preferred)
+            )
+
+    if strict_mode and len(selected) < count:
+        raise ValueError(
+            f"strict_brand 模式下，当前规则与需求约束仅能生成 {len(selected)} 个模块，"
+            f"少于要求的 {count} 个，请调整规则版本或需求约束"
+        )
+
+    if not strict_mode and len(selected) < count:
+        defaults = _default_layout_blueprint(count)
+        for item in defaults:
+            role = _normalize_module_token(str(item.get("role") or item.get("name") or ""))
+            if role in forbidden:
+                continue
+            selected.append(item)
+            if len(selected) >= count:
+                break
+
+    selected = selected[:count]
+    if strict_mode and not any(str(item.get("role") or "") == "hero" for item in selected):
+        raise ValueError("strict_brand 模式下必须保留首屏 Hero 模块，当前需求约束移除了该模块")
+    return _renumber_blueprint(selected)
+
+
+def _build_layout_blueprint(
+    detail_page_rule: dict[str, Any],
+    count: int,
+    constraints: dict[str, Any] | None = None,
+    strict_mode: bool = False,
+) -> list[dict[str, Any]]:
     if not detail_page_rule:
-        return _default_layout_blueprint(count)
+        if strict_mode:
+            raise ValueError("strict_brand 模式要求命中详情页 Derived Rule，不能回退到默认模板")
+        return _apply_requirement_constraints_to_blueprint(
+            _default_layout_blueprint(count), count, constraints or {}, strict_mode
+        )
 
     items = _rule_list(detail_page_rule, "layout_rules", "layoutRules") or _rule_list(
         detail_page_rule, "components", "components"
@@ -282,7 +528,9 @@ def _build_layout_blueprint(detail_page_rule: dict[str, Any], count: int) -> lis
         )
 
     if not blueprint:
-        return _default_layout_blueprint(count)
+        if strict_mode:
+            raise ValueError("strict_brand 模式下，命中的详情页规则未提取出可执行的布局蓝图")
+        blueprint = _default_layout_blueprint(count)
 
     hero_index = next((i for i, item in enumerate(blueprint) if item["role"] == "hero"), None)
     if hero_index is None:
@@ -306,7 +554,9 @@ def _build_layout_blueprint(detail_page_rule: dict[str, Any], count: int) -> lis
                 break
             blueprint.append(item)
 
-    return blueprint[:count]
+    return _apply_requirement_constraints_to_blueprint(
+        blueprint[:count], count, constraints or {}, strict_mode
+    )
 
 
 def _merge_modules_with_blueprint(
@@ -401,6 +651,7 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
             f"品牌：{req.brand_name}\n"
             f"商品图文件名：{image_names}\n"
             f"brief 文本：\n{req.product_brief}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请输出 Product Brief 基础信息，字段："
             "product_type, target_audience, main_color, material, key_features(数组), "
             "scenarios(数组), usable_images(对象，含 hero_image、detail_images 数组、scene_images 数组)。"
@@ -476,6 +727,7 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
         prompt = (
             f"商品视觉信息：{json.dumps(ctx.product_info, ensure_ascii=False)}\n"
             f"brief 文本：\n{req.product_brief}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请合并视觉信息与 brief，输出 Product Brief："
             "brand, product, audience, selling_points(数组), specifications(对象), scenarios(数组), design_focus。"
         )
@@ -533,6 +785,7 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             f"选中的详情页 Derived Rule：{json.dumps(selected_detail_rule, ensure_ascii=False)}\n"
             f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"界面字体配置：{req.typography.model_dump_json()}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请生成 Brand Design System 摘要，输出："
             "version, rule_status, core_rule(对象), derived_rule(对象), asset_memory(对象), "
             "rule_weights(对象), drift_risks(数组), brand_style, primary_color, secondary_colors(数组), "
@@ -578,6 +831,7 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
                 "page_type": "商品详情页",
                 "module_template": [item["name"] for item in ctx.layout_blueprint],
                 "editable_scope": "允许页面层模块、文案和图片策略随任务调整，但受 Core Rule 约束。",
+                "requirement_constraints": ctx.effective_constraints,
             },
             "asset_memory": {
                 "role": "仅作为参考案例，不直接修改核心品牌规则",
@@ -645,6 +899,7 @@ def stage_design(ctx: PipelineContext) -> StageResult:
             f"工作流模式：{req.workflow_mode.value}\n"
             f"参考图说明：{req.reference_notes}\n\n"
             f"参考案例图片：{ctx.reference_images}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请输出页面规划策略，字段："
             "direction(整体视觉方向，字符串), page_template(数组), information_architecture(数组), "
             "tone(色调与节奏), image_strategy(图片资产需求), brand_constraints(数组), risks(数组)。"
@@ -671,6 +926,8 @@ def stage_design(ctx: PipelineContext) -> StageResult:
                 "严格遵守品牌字体与字号" if req.typography.lock_brand_typography else "字体可在品牌库内微调",
                 f"主色锁定 {req.layout.accent_color}",
                 "页面结构必须优先遵守选中的详情页布局规则与模块顺序",
+                *[f"布局约束：{item}" for item in ctx.effective_constraints.get("layout_constraints", [])[:4]],
+                *[f"视觉约束：{item}" for item in ctx.effective_constraints.get("visual_constraints", [])[:4]],
             ],
             "risks": ["实拍素材需人工抠图调色", "文案避免绝对化与平台风险词"],
         }
@@ -711,6 +968,7 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
             f"画布宽度：{req.layout.canvas_width}px，模块数量：{count}\n"
             f"主视觉高度：{req.layout.hero_height}，普通模块高度：{req.layout.module_height}\n"
             f"可用商品图：{ctx.images}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请输出版式规划，字段 modules 为数组，每个元素含："
             "name(模块中文名), layer_group(英文图层组名), layout(布局类型), "
             "height(整数像素), role(hero/feature/technology/scenario/parameter/brand_story/cta), "
@@ -810,6 +1068,7 @@ def stage_image_generation(ctx: PipelineContext) -> StageResult:
             f"模块蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"已有商品图：{ctx.images}\n"
             f"参考图：{ctx.reference_images}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请输出 images 数组，每个元素包含："
             "name, module_index, module_name, role, image_role, source, prompt。"
             "source 取值建议为 ai_generated 或 reference_derived。"
@@ -862,6 +1121,7 @@ def stage_copy(ctx: PipelineContext) -> StageResult:
             f"卖点：{ctx.structured_info.get('selling_points')}\n"
             f"brief：\n{req.product_brief}\n"
             f"模块列表：{module_names}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请为每个模块生成文案，输出 blocks 为数组，"
             "顺序与模块列表一致，每个元素含："
             "headline(主标题), subtitle(副标题), body(短说明), points(要点数组)。"
@@ -954,6 +1214,7 @@ def stage_psd(ctx: PipelineContext) -> StageResult:
         # 设计稿阶段以确定性结构为主，模型只补充命名建议与注意事项。
         prompt = (
             f"模块与文案：{json.dumps([{'name': m['name'], 'copy': m['copy']} for m in ctx.modules], ensure_ascii=False)}\n\n"
+            f"{_constraint_prompt_block(ctx)}"
             "请输出 Figma / PSD 生产说明，字段 notes(数组，图层命名、组件映射与可编辑性注意事项)。"
         )
         data = ctx.llm.invoke_json(req.prompts.psd_agent_prompt, prompt)
@@ -1059,6 +1320,8 @@ def stage_outputs(ctx: PipelineContext) -> StageResult:
         "feedback_capture": {
             "tracked_changes": ["模块隐藏/删除", "字体字号调整", "颜色调整", "文案修改", "图片替换"],
             "learning_policy": "本阶段只记录设计师修改，不自动强化学习、不自动覆盖品牌规则。",
+            "effective_constraints": ctx.effective_constraints,
+            "feedback_constraints": ctx.feedback_constraints,
         },
         "next_step": "进入人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。",
     }
@@ -1106,6 +1369,7 @@ def run_pipeline(
     run_id: str = "",
     cancel_checker: Callable[[], bool] | None = None,
     selected_rule_context: dict[str, Any] | None = None,
+    feedback_constraints: dict[str, Any] | None = None,
 ) -> tuple[list[StageResult], PipelineContext]:
     reset_run(run_id or "local")
     try:
@@ -1120,8 +1384,19 @@ def run_pipeline(
         cancel_checker=cancel_checker or (lambda: False),
         core_rule=dict((selected_rule_context or {}).get("coreRule") or {}),
         detail_page_rule=dict((selected_rule_context or {}).get("detailPageRule") or {}),
+        requirement_constraints=request.requirement_constraints.model_dump(),
+        feedback_constraints=dict(feedback_constraints or {}),
     )
-    ctx.layout_blueprint = _build_layout_blueprint(ctx.detail_page_rule, request.layout.module_count)
+    ctx.effective_constraints = _merge_effective_constraints(
+        ctx.requirement_constraints,
+        ctx.feedback_constraints,
+    )
+    ctx.layout_blueprint = _build_layout_blueprint(
+        ctx.detail_page_rule,
+        request.layout.module_count,
+        ctx.effective_constraints,
+        ctx.strict_mode,
+    )
     set_run_state(ctx.run_id, "running", None)
     _workflow_log(
         ctx.run_id,
@@ -1132,6 +1407,9 @@ def run_pipeline(
             "product_name": request.product_name,
             "assets": [asset.model_dump() for asset in assets],
             "selected_rules": selected_rule_context or {},
+            "requirement_constraints": ctx.requirement_constraints,
+            "feedback_constraints": ctx.feedback_constraints,
+            "effective_constraints": ctx.effective_constraints,
         },
     )
     stages = [stage(ctx) for stage in PIPELINE_STAGES]

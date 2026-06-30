@@ -69,6 +69,20 @@ def default_workflow_payload() -> dict[str, Any]:
             "image_ratio": 0.62,
             "spacing_scale": 1.0,
         },
+        "requirement_constraints": {
+            "preferred_module_order": [],
+            "required_modules": [],
+            "forbidden_modules": [],
+            "layout_constraints": [],
+            "visual_constraints": [],
+            "copy_constraints": [],
+            "asset_constraints": [],
+            "negative_constraints": [],
+            "reference_alignment": "",
+            "apply_feedback_constraints": True,
+            "feedback_scope": "same_product",
+            "feedback_run_id": None,
+        },
         "prompts": DEFAULT_PROMPTS.model_dump(),
     }
 

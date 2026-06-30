@@ -167,7 +167,7 @@ def config_defaults() -> dict[str, object]:
         database.ensure_seed_data()
         defaults = database.get_workflow_defaults_data() or load_workflow_defaults()
         stages = database.get_workflow_stages_data() or database.DEFAULT_WORKFLOW_STAGES
-    defaults = {**defaults, "model_config": load_system_model_config()}
+    defaults = _merge_payload(defaults)
     return {
         "payload": defaults,
         "prompts": defaults["prompts"],
@@ -688,6 +688,49 @@ def _merge_payload(incoming: dict) -> dict:
     return data
 
 
+def _validate_workflow_rule_selection(
+    request: WorkflowRequest,
+    selected_rule_context: dict[str, object],
+) -> None:
+    core_rule = dict(selected_rule_context.get("coreRule") or {})
+    detail_rule = dict(selected_rule_context.get("detailPageRule") or {})
+
+    if request.selected_core_rule_id and not core_rule:
+        raise HTTPException(status_code=422, detail="所选品牌 Core Rule 未命中，请重新选择后再生成")
+    if request.selected_detail_page_rule_id and not detail_rule:
+        raise HTTPException(status_code=422, detail="所选详情页 Derived Rule 未命中，请重新选择后再生成")
+
+    if request.workflow_mode.value != "strict_brand":
+        return
+
+    missing: list[str] = []
+    if not core_rule:
+        missing.append("品牌 Core Rule")
+    if not detail_rule:
+        missing.append("详情页 Derived Rule")
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail=f"strict_brand 模式要求命中 {' 和 '.join(missing)}，当前无法继续生成",
+        )
+
+    inactive: list[str] = []
+    if str(core_rule.get("status") or "") != "active":
+        inactive.append("品牌 Core Rule 不是已发布生效版本")
+    if str(detail_rule.get("status") or "") != "active":
+        inactive.append("详情页 Derived Rule 不是已发布生效版本")
+    if inactive:
+        raise HTTPException(status_code=422, detail="；".join(inactive))
+
+    detail_layout_rules = detail_rule.get("layoutRules") or detail_rule.get("layout_rules") or []
+    detail_components = detail_rule.get("components") or []
+    if not detail_layout_rules and not detail_components:
+        raise HTTPException(
+            status_code=422,
+            detail="strict_brand 模式要求命中的详情页 Derived Rule 至少包含布局规则或组件规则",
+        )
+
+
 @app.post("/api/brand-assets/upload")
 async def upload_brand_assets(
     brand_id: int = Form(...),
@@ -819,6 +862,14 @@ def generate_workflow(
 
     if selected_rule_context.get("brandName"):
         request.brand_name = str(selected_rule_context["brandName"])
+    _validate_workflow_rule_selection(request, selected_rule_context)
+
+    feedback_constraints = database.get_feedback_constraints_for_request(
+        brand_name=request.brand_name,
+        product_name=request.product_name,
+        feedback_scope=request.requirement_constraints.feedback_scope,
+        feedback_run_id=request.requirement_constraints.feedback_run_id,
+    )
 
     run_id = _safe_run_id(client_run_id)
     CANCELLED_RUNS.discard(run_id)
@@ -868,11 +919,16 @@ def generate_workflow(
             run_id=run_id,
             cancel_checker=lambda: run_id in CANCELLED_RUNS,
             selected_rule_context=selected_rule_context,
+            feedback_constraints=feedback_constraints,
         )
     except WorkflowCancelled as exc:
         CANCELLED_RUNS.discard(run_id)
         set_run_state(run_id, "cancelled", None)
         raise HTTPException(status_code=499, detail=str(exc)) from exc
+    except ValueError as exc:
+        CANCELLED_RUNS.discard(run_id)
+        set_run_state(run_id, "failed", None)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
         CANCELLED_RUNS.discard(run_id)
         set_run_state(run_id, "failed", None)

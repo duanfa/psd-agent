@@ -73,6 +73,9 @@ class PipelineContext:
     feedback_plan: dict[str, Any] = field(default_factory=dict)
     outputs: dict[str, Any] = field(default_factory=dict)
     report_parts: list[str] = field(default_factory=list)
+    core_rule: dict[str, Any] = field(default_factory=dict)
+    detail_page_rule: dict[str, Any] = field(default_factory=dict)
+    layout_blueprint: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def images(self) -> list[str]:
@@ -167,6 +170,162 @@ def _normalize_text_items(value: Any) -> list[str]:
         if text:
             items.append(text)
     return items
+
+
+def _rule_list(rule: dict[str, Any], snake_key: str, camel_key: str) -> list[dict[str, Any]]:
+    value = rule.get(snake_key)
+    if value is None:
+        value = rule.get(camel_key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _infer_module_role(text: str, index: int) -> str:
+    normalized = text.lower()
+    checks = [
+        ("hero", ("hero", "首屏", "头图", "主视觉", "kv", "banner")),
+        ("technology", ("technology", "工艺", "技术", "结构", "细节", "放大", "局部")),
+        ("scenario", ("scenario", "场景", "通勤", "使用", "出行", "office", "scene")),
+        ("parameter", ("parameter", "参数", "规格", "对比", "尺寸", "容量", "数据")),
+        ("brand_story", ("brand", "品牌", "故事", "about", "理念")),
+        ("cta", ("cta", "购买", "行动", "咨询", "下单", "转化")),
+        ("feature", ("feature", "卖点", "亮点", "优势", "特点", "功能")),
+    ]
+    for role, keywords in checks:
+        if any(keyword in normalized for keyword in keywords):
+            return role
+    return "hero" if index == 0 else "feature"
+
+
+def _infer_layout_type(text: str, role: str) -> str:
+    normalized = text.lower()
+    if "右文左图" in text or "text right" in normalized:
+        return "right_text_left_image"
+    if "左文右图" in text or "text left" in normalized:
+        return "left_text_right_image"
+    if any(keyword in normalized for keyword in ("三列", "卡片", "cards", "grid")):
+        return "three_column_cards"
+    if any(keyword in normalized for keyword in ("全屏", "全宽", "大场景", "full", "bleed")):
+        return "full_bleed_scene"
+    if any(keyword in normalized for keyword in ("表格", "参数", "规格", "对比", "table")):
+        return "spec_table"
+    if any(keyword in normalized for keyword in ("细节", "局部", "放大", "zoom")):
+        return "detail_zoom"
+    if role == "hero":
+        return "centered_hero" if any(keyword in normalized for keyword in ("居中", "center")) else "hero_split"
+    if role == "scenario":
+        return "full_bleed_scene"
+    if role == "parameter":
+        return "spec_table"
+    if role == "technology":
+        return "detail_zoom"
+    return "left_text_right_image"
+
+
+def _role_display_name(role: str) -> str:
+    return {
+        "hero": "首屏主视觉",
+        "feature": "卖点模块",
+        "technology": "工艺细节",
+        "scenario": "场景展示",
+        "parameter": "参数对比",
+        "brand_story": "品牌故事",
+        "cta": "行动转化",
+    }.get(role, "内容模块")
+
+
+def _default_layout_blueprint(count: int) -> list[dict[str, Any]]:
+    templates = _FALLBACK_MODULE_TEMPLATES[:count]
+    return [
+        {
+            "name": title,
+            "layer_group": group,
+            "layout": layout,
+            "role": role,
+            "image_role": "主视觉图" if role == "hero" else f"{title}用图",
+        }
+        for group, title, layout, role in templates
+    ]
+
+
+def _build_layout_blueprint(detail_page_rule: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    if not detail_page_rule:
+        return _default_layout_blueprint(count)
+
+    items = _rule_list(detail_page_rule, "layout_rules", "layoutRules") or _rule_list(
+        detail_page_rule, "components", "components"
+    )
+    blueprint: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        text = " ".join(part for part in [title, description] if part)
+        if not text:
+            continue
+        role = _infer_module_role(text, index)
+        layout = _infer_layout_type(text, role)
+        layer_group = f"{index + 1:02d}_{role.title().replace('_', '')}"
+        blueprint.append(
+            {
+                "name": title or _role_display_name(role),
+                "layer_group": layer_group,
+                "layout": layout,
+                "role": role,
+                "image_role": "主视觉图" if role == "hero" else f"{title or _role_display_name(role)}参考图",
+            }
+        )
+
+    if not blueprint:
+        return _default_layout_blueprint(count)
+
+    hero_index = next((i for i, item in enumerate(blueprint) if item["role"] == "hero"), None)
+    if hero_index is None:
+        blueprint.insert(
+            0,
+            {
+                "name": "首屏主视觉",
+                "layer_group": "01_Hero",
+                "layout": "hero_split",
+                "role": "hero",
+                "image_role": "主视觉图",
+            },
+        )
+    elif hero_index != 0:
+        blueprint.insert(0, blueprint.pop(hero_index))
+
+    if len(blueprint) < count:
+        defaults = _default_layout_blueprint(count)
+        for item in defaults:
+            if len(blueprint) >= count:
+                break
+            blueprint.append(item)
+
+    return blueprint[:count]
+
+
+def _merge_modules_with_blueprint(
+    modules: list[dict[str, Any]], blueprint: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    if not blueprint:
+        return modules
+    merged: list[dict[str, Any]] = []
+    total = max(len(modules), len(blueprint))
+    for index in range(total):
+        raw = modules[index] if index < len(modules) else {}
+        hint = blueprint[index] if index < len(blueprint) else {}
+        merged.append(
+            {
+                **hint,
+                **raw,
+                "name": hint.get("name") or raw.get("name"),
+                "layer_group": hint.get("layer_group") or raw.get("layer_group"),
+                "layout": hint.get("layout") or raw.get("layout"),
+                "role": hint.get("role") or raw.get("role"),
+                "image_role": hint.get("image_role") or raw.get("image_role"),
+            }
+        )
+    return merged
 
 
 # ----------------------------- 各阶段实现 -----------------------------
@@ -355,6 +514,8 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
 def stage_brand_rag(ctx: PipelineContext) -> StageResult:
     req = ctx.request
     settings = req.model_settings
+    selected_core_rule = ctx.core_rule or {}
+    selected_detail_rule = ctx.detail_page_rule or {}
 
     def model_fn() -> dict[str, Any]:
         prompt = (
@@ -363,6 +524,9 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             f"参考图说明：\n{req.reference_notes}\n"
             f"参考案例图片：{ctx.reference_images}\n"
             f"可用字体文件：{ctx.fonts}\n"
+            f"选中的 Core Rule：{json.dumps(selected_core_rule, ensure_ascii=False)}\n"
+            f"选中的详情页 Derived Rule：{json.dumps(selected_detail_rule, ensure_ascii=False)}\n"
+            f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"界面字体配置：{req.typography.model_dump_json()}\n\n"
             "请生成 Brand Design System 摘要，输出："
             "version, rule_status, core_rule(对象), derived_rule(对象), asset_memory(对象), "
@@ -387,6 +551,10 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
                 "mode": "text",
                 "images": ctx.reference_images,
             }
+        if ctx.layout_blueprint:
+            data["module_order"] = [item["name"] for item in ctx.layout_blueprint]
+            data["selected_core_rule"] = selected_core_rule
+            data["selected_detail_page_rule"] = selected_detail_rule
         ctx.brand_profile = data
         return data
 
@@ -403,7 +571,7 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             },
             "derived_rule": {
                 "page_type": "商品详情页",
-                "module_template": ["Hero", "Feature", "Scenario", "Parameter", "Brand Story", "CTA"],
+                "module_template": [item["name"] for item in ctx.layout_blueprint],
                 "editable_scope": "允许页面层模块、文案和图片策略随任务调整，但受 Core Rule 约束。",
             },
             "asset_memory": {
@@ -412,7 +580,9 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
                 "reference_images": ctx.reference_images,
                 "asset_names": [asset.name for asset in ctx.assets],
             },
-            "rule_weights": {"core_rule": 0.7, "derived_rule": 0.2, "asset_memory": 0.1},
+            "selected_core_rule": selected_core_rule,
+            "selected_detail_page_rule": selected_detail_rule,
+            "rule_weights": {"core_rule": 0.55, "derived_rule": 0.35, "asset_memory": 0.1},
             "drift_risks": ["新上传资产默认进入训练池，不自动覆盖当前生效规则"],
             "brand_style": req.layout.visual_style,
             "primary_color": req.layout.accent_color,
@@ -427,18 +597,12 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
                 f"标题 {req.typography.title_font} {req.typography.title_size}号",
                 f"正文 {req.typography.body_font} {req.typography.body_size}号",
                 f"英文 {req.typography.english_font}",
+                "详情页模块顺序与图文分区优先遵守选中的 Derived Rule",
                 "先生成结构化页面 Layout JSON，再映射到 Figma / PSD 输出",
             ],
-            "component_patterns": ["Hero", "Feature", "Technology", "Scenario", "Parameter", "Brand Story", "CTA"],
+            "component_patterns": [item["layout"] for item in ctx.layout_blueprint],
             "prompt_templates": ["详情页页面规划", "场景图生成", "局部模块重生成", "设计评分"],
-            "module_order": [
-                "Hero",
-                "Feature",
-                "Scenario",
-                "Parameter",
-                "Brand Story",
-                "CTA",
-            ],
+            "module_order": [item["name"] for item in ctx.layout_blueprint],
         }
         ctx.brand_profile = data
         return data
@@ -464,38 +628,44 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
 
 def stage_design(ctx: PipelineContext) -> StageResult:
     req = ctx.request
+    detail_rule = ctx.detail_page_rule or {}
 
     def model_fn() -> dict[str, Any]:
         prompt = (
             f"商品结构：{json.dumps(ctx.structured_info, ensure_ascii=False)}\n"
             f"品牌风格：{json.dumps(ctx.brand_profile, ensure_ascii=False)}\n"
+            f"选中的 Core Rule：{json.dumps(ctx.core_rule, ensure_ascii=False)}\n"
+            f"选中的详情页 Derived Rule：{json.dumps(detail_rule, ensure_ascii=False)}\n"
+            f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"工作流模式：{req.workflow_mode.value}\n"
             f"参考图说明：{req.reference_notes}\n\n"
             f"参考案例图片：{ctx.reference_images}\n\n"
             "请输出页面规划策略，字段："
             "direction(整体视觉方向，字符串), page_template(数组), information_architecture(数组), "
             "tone(色调与节奏), image_strategy(图片资产需求), brand_constraints(数组), risks(数组)。"
+            "如果已提供详情页 Derived Rule，page_template 与 information_architecture 必须优先服从该规则，不要退回默认模块顺序。"
         )
         data = ctx.llm.invoke_json(req.prompts.design_agent_prompt, prompt)
+        if ctx.layout_blueprint:
+            data["page_template"] = [item["name"] for item in ctx.layout_blueprint]
         ctx.design_direction = data
         return data
 
     def fallback_fn() -> dict[str, Any]:
+        page_template = [item["name"] for item in ctx.layout_blueprint]
         data = {
-            "direction": "对齐参考图：浅色背景 + 大图展示 + 简洁文字层级，突出商品质感与通勤属性。",
-            "page_template": ["Hero", "Feature", "Scenario", "Parameter", "Brand Story", "CTA"],
+            "direction": "优先贴合选中的详情页规则与参考图：保留模块节奏、图文占比和主视觉位置，再补足商品卖点表达。",
+            "page_template": page_template,
             "information_architecture": [
-                "首屏建立品牌和商品心智",
-                "核心卖点用卡片或分段模块展开",
-                "场景模块承接用户使用想象",
-                "参数与品牌收尾提供决策依据",
+                f"{name}：优先沿用参考页同类型信息区块与图文分区"
+                for name in page_template[: max(4, len(page_template))]
             ],
-            "tone": "低饱和、冷静、商务；节奏为大图 → 局部细节 → 功能说明。",
+            "tone": "低饱和、冷静、商务；节奏优先复用参考页的大图、细节、参数与收尾顺序。",
             "image_strategy": "Image Studio 需补齐主视觉、卖点图、场景图与参数说明图；素材不足时以占位图进入设计师审核。",
             "brand_constraints": [
                 "严格遵守品牌字体与字号" if req.typography.lock_brand_typography else "字体可在品牌库内微调",
                 f"主色锁定 {req.layout.accent_color}",
-                "页面结构必须基于标准模块模板，不自由扩写模块体系",
+                "页面结构必须优先遵守选中的详情页布局规则与模块顺序",
             ],
             "risks": ["实拍素材需人工抠图调色", "文案避免绝对化与平台风险词"],
         }
@@ -529,6 +699,9 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
         prompt = (
             f"设计方向：{json.dumps(ctx.design_direction, ensure_ascii=False)}\n"
             f"品牌模块顺序：{ctx.brand_profile.get('module_order')}\n"
+            f"选中的详情页 Derived Rule：{json.dumps(ctx.detail_page_rule, ensure_ascii=False)}\n"
+            f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
+            f"参考案例图片：{ctx.reference_images}\n"
             f"画布宽度：{req.layout.canvas_width}px，模块数量：{count}\n"
             f"主视觉高度：{req.layout.hero_height}，普通模块高度：{req.layout.module_height}\n"
             f"可用商品图：{ctx.images}\n\n"
@@ -537,26 +710,22 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
             "height(整数像素), role(hero/feature/technology/scenario/parameter/brand_story/cta), "
             "image_role(该模块主要用什么图), elements(图层元素数组)。"
             f"模块数量必须是 {count} 个。"
+            "如果已提供强布局蓝图，必须优先保持相同模块顺序、主次层级、图文左右关系和大图区位置。"
         )
         data = ctx.llm.invoke_json(req.prompts.layout_agent_prompt, prompt)
         modules = data.get("modules")
         if not isinstance(modules, list) or not modules:
             raise LLMUnavailable("版式 Agent 未返回 modules 数组")
-        ctx.modules = _normalize_modules(modules, ctx)
+        ctx.modules = _normalize_modules(_merge_modules_with_blueprint(modules, ctx.layout_blueprint), ctx)
         return {"modules": ctx.modules}
 
     def fallback_fn() -> dict[str, Any]:
-        templates = _FALLBACK_MODULE_TEMPLATES[:count]
         modules = [
             {
-                "name": title,
-                "layer_group": group,
-                "layout": layout,
-                "role": role,
-                "image_role": "主视觉图" if role == "hero" else f"{title}用图",
+                **item,
                 "elements": ["BG_背景", "IMG_图片", "TXT_标题", "TXT_说明"],
             }
-            for group, title, layout, role in templates
+            for item in ctx.layout_blueprint[:count]
         ]
         ctx.modules = _normalize_modules(modules, ctx)
         return {"modules": ctx.modules}
@@ -852,6 +1021,7 @@ def run_pipeline(
     assets: list[UploadedAsset],
     run_id: str = "",
     cancel_checker: Callable[[], bool] | None = None,
+    selected_rule_context: dict[str, Any] | None = None,
 ) -> tuple[list[StageResult], PipelineContext]:
     reset_run(run_id or "local")
     try:
@@ -864,7 +1034,10 @@ def run_pipeline(
         llm=LLMClient(request.model_settings, run_id=run_id or "local"),
         run_id=run_id or "local",
         cancel_checker=cancel_checker or (lambda: False),
+        core_rule=dict((selected_rule_context or {}).get("coreRule") or {}),
+        detail_page_rule=dict((selected_rule_context or {}).get("detailPageRule") or {}),
     )
+    ctx.layout_blueprint = _build_layout_blueprint(ctx.detail_page_rule, request.layout.module_count)
     set_run_state(ctx.run_id, "running", None)
     _workflow_log(
         ctx.run_id,
@@ -874,6 +1047,7 @@ def run_pipeline(
             "brand_name": request.brand_name,
             "product_name": request.product_name,
             "assets": [asset.model_dump() for asset in assets],
+            "selected_rules": selected_rule_context or {},
         },
     )
     stages = [stage(ctx) for stage in PIPELINE_STAGES]

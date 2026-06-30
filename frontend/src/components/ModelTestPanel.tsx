@@ -82,7 +82,7 @@ export function ModelTestPanel() {
         <div className="panel-scroll">
           <Section
             title="文本模型配置"
-            description="直接读取 config/workflow-gpt.json 的 model_config"
+            description="直接读取后端当前生效的 model_config"
             icon={<Cpu size={16} />}
             defaultOpen
           >
@@ -128,7 +128,7 @@ export function ModelTestPanel() {
                 </div>
                 <p className="hint">
                   模型测试不会读取页面填写值，发送请求时后端会直接使用
-                  `config/workflow-gpt.json` 里的 `model_config`。
+                  当前生效配置来源（`workflow-defaults*.json`，以及可选的 `workflow-gpt.json` 覆盖层）。
                 </p>
               </>
             ) : null}

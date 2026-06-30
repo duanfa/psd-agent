@@ -107,8 +107,21 @@ def load_workflow_defaults() -> dict[str, Any]:
 
 def load_system_model_config() -> dict[str, Any]:
     defaults = default_workflow_payload()
+    file_defaults = _read_json(DEFAULT_CONFIG_PATH)
+    local_overrides = _read_json(LOCAL_CONFIG_PATH)
+    merged = _deep_merge(_deep_merge(defaults, file_defaults), local_overrides)
+    base_model_config = dict(merged.get("model_config", {}))
     file_config = _read_json(SYSTEM_MODEL_CONFIG_PATH)
     model_config = file_config.get("model_config")
     if isinstance(model_config, dict):
-        return _deep_merge(defaults.get("model_config", {}), model_config)
-    return dict(defaults.get("model_config", {}))
+        return _deep_merge(base_model_config, model_config)
+    return base_model_config
+
+
+def describe_system_model_config_source() -> str:
+    sources = ["config/workflow-defaults.json"]
+    if LOCAL_CONFIG_PATH.is_file():
+        sources.append("config/workflow-defaults.local.json")
+    if SYSTEM_MODEL_CONFIG_PATH.is_file():
+        sources.append("config/workflow-gpt.json")
+    return " -> ".join(sources)

@@ -1,7 +1,7 @@
 "use client";
 
 import { Eye, GitCompareArrows, Loader2, PencilLine, Rocket, RotateCcw, Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -12,6 +12,7 @@ import {
   publishBrandRule,
   rollbackBrandRule,
   trainBrandRules,
+  type BrandRuleTarget,
   type BrandRuleDiffResponse,
   type BrandRulesPageResponse,
   updateBrandRuleMarkdown,
@@ -38,6 +39,18 @@ function getStatusTone(status?: string | null) {
 }
 
 type BrandRuleVersion = BrandRulesPageResponse["versions"][number];
+const TARGET_LABELS: Record<BrandRuleTarget, string> = {
+  brand_core: "品牌设计规范",
+  detail_page_layout: "详情页布局规范",
+};
+
+function defaultPromptByTarget(target: BrandRuleTarget) {
+  if (target === "detail_page_layout") {
+    return "请从该品牌的详情页素材中提取清晰的页面布局、文字排版层级和图片放置位置区域，形成可复用的商品详情页规则。";
+  }
+  return "请从官网素材和品牌资产中提取品牌视觉规范、字体色彩、品牌语气和禁用项，形成稳定的品牌设计规范。";
+}
+
 type RuleDialogMode = "preview" | "edit";
 type RuleDialogState = {
   mode: RuleDialogMode;
@@ -67,12 +80,24 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
   const [ruleDialog, setRuleDialog] = useState<RuleDialogState>(null);
   const [markdown, setMarkdown] = useState(initialData.markdown);
   const [trainForm, setTrainForm] = useState({
+    trainingTarget: initialData.selectedTargetKey ?? ("brand_core" as BrandRuleTarget),
     assetIds: initialData.sourceAssets.map((item) => item.id),
     prompt: initialData.trainingPrompt,
     websiteUrls: initialData.websiteUrls.join("\n"),
     baseVersionId: initialData.selectedVersionId ?? null,
     useBaseVersion: Boolean(initialData.selectedVersionId),
   });
+  const selectedVersion = data.versions.find((version) => version.id === data.selectedVersionId);
+  const activeVersion =
+    data.versions.find(
+      (version) => version.status === "active" && version.targetKey === (selectedVersion?.targetKey ?? data.selectedTargetKey),
+    ) ?? null;
+  const filteredTrainVersions = useMemo(
+    () => data.versions.filter((version) => version.targetKey === trainForm.trainingTarget),
+    [data.versions, trainForm.trainingTarget],
+  );
+  const selectedVersionStatusTone = getStatusTone(selectedVersion?.status);
+  const currentTargetLabel = TARGET_LABELS[trainForm.trainingTarget];
 
   const loadData = async (brandId: number, versionId?: number | null) => {
     setLoading(true);
@@ -86,6 +111,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
       setVersionDiff(null);
       setMarkdown(next.markdown);
       setTrainForm({
+        trainingTarget: next.selectedTargetKey ?? "brand_core",
         assetIds: next.sourceAssets.map((item) => item.id),
         prompt: next.trainingPrompt,
         websiteUrls: next.websiteUrls.join("\n"),
@@ -155,6 +181,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
         assetIds: trainForm.assetIds,
         prompt: trainForm.prompt,
         websiteUrls: urls,
+        trainingTarget: trainForm.trainingTarget,
         baseVersionId: trainForm.useBaseVersion ? trainForm.baseVersionId : null,
         clientRunId: runId,
       });
@@ -215,10 +242,6 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
       setDeletingVersionId(null);
     }
   };
-
-  const selectedVersion = data.versions.find((version) => version.id === data.selectedVersionId);
-  const activeVersion = data.versions.find((version) => version.status === "active");
-  const selectedVersionStatusTone = getStatusTone(selectedVersion?.status);
 
   const handleOpenRuleDialog = async (version: BrandRuleVersion, mode: RuleDialogMode) => {
     setPreviewLoadingId(version.id);
@@ -351,7 +374,10 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
             <div className="brand-rule-brand-highlight-head">
               <div>
                 <strong>{data.selectedBrand.name}</strong>
-                <span>{activeVersion ? `当前生效：${activeVersion.version}` : "当前暂无生效版本"}</span>
+                <span>
+                  Core：{data.activeVersions?.brand_core?.version || "无"} / 详情页：
+                  {data.activeVersions?.detail_page_layout?.version || "无"}
+                </span>
               </div>
               <span className={`status-pill ${selectedVersionStatusTone}`}>
                 {selectedVersion?.status ?? "未选择"}
@@ -363,16 +389,21 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                 <strong>{data.versions.length}</strong>
               </div>
               <div>
-                <span>设计规则</span>
-                <strong>{data.designRules.length}</strong>
+                <span>Core Rule</span>
+                <strong>{data.targetSummaries?.find((item) => item.targetKey === "brand_core")?.count ?? 0}</strong>
               </div>
               <div>
-                <span>布局规则</span>
-                <strong>{data.layoutRules.length}</strong>
+                <span>详情页规则</span>
+                <strong>{data.targetSummaries?.find((item) => item.targetKey === "detail_page_layout")?.count ?? 0}</strong>
               </div>
               <div>
-                <span>Prompt 模板</span>
-                <strong>{data.promptTemplates.length}</strong>
+                <span>当前规则类型</span>
+                <strong>
+                  {selectedVersion?.targetLabel ??
+                    (data.selectedTargetKey
+                      ? TARGET_LABELS[(data.selectedTargetKey ?? "brand_core") as BrandRuleTarget]
+                      : "未选择")}
+                </strong>
               </div>
             </div>
           </div>
@@ -390,10 +421,10 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                 <span>
                   <strong>{brand.name}</strong>
                   <small>
-                    {brand.status} / {brand.version}
+                    {brand.status} / Core {brand.coreVersion || "无"} / 详情页 {brand.detailPageVersion || "无"}
                   </small>
                 </span>
-                <em>{brand.ruleCount}</em>
+                <em>{brand.totalVersions ?? brand.ruleCount}</em>
               </button>
             ))}
           </div>
@@ -417,7 +448,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                     {data.versions.length ? (
                       data.versions.map((version) => (
                         <option key={version.id} value={version.id}>
-                          {version.version} {version.status === "active" ? "（当前）" : ""}
+                          {version.targetLabel} / {version.version} {version.status === "active" ? "（当前）" : ""}
                         </option>
                       ))
                     ) : (
@@ -443,6 +474,26 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
           ) : (
             <>
               <div className="content-grid-sidebar brand-rule-workspace-grid">
+                {data.targetSummaries?.length ? (
+                  <section className="panel content-panel">
+                    <div className="split-line">
+                      <div>
+                        <h2 className="section-title">规则类型分组</h2>
+                        <div className="subtitle">同一品牌下分别管理品牌设计规范与详情页 Derived Rule。</div>
+                      </div>
+                    </div>
+                    <div className="action-grid action-grid-2">
+                      {data.targetSummaries.map((item) => (
+                        <article className="info-card" key={item.targetKey}>
+                          <div className="eyebrow">{item.label}</div>
+                          <div className="big-metric">{item.count}</div>
+                          <p>{item.summary}</p>
+                          <div className="muted-text">当前生效：{item.activeVersion || "无"}</div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
                 <section className="panel content-panel">
                   <div className="split-line">
                     <div>
@@ -456,6 +507,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                       <thead>
                         <tr>
                           <th>版本</th>
+                          <th>规则类型</th>
                           <th>状态</th>
                           <th>叠加版本</th>
                           <th>规则概览</th>
@@ -475,6 +527,9 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                                   <span className="subtitle">
                                     {isEditing ? "当前选中版本" : "支持弹窗查看"}
                                   </span>
+                                </td>
+                                <td>
+                                  <span className="tag">{version.targetLabel}</span>
                                 </td>
                                 <td>
                                   <span className={`status-pill ${getStatusTone(version.status)}`}>
@@ -523,7 +578,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                           })
                         ) : (
                           <tr>
-                            <td className="table-empty" colSpan={6}>
+                            <td className="table-empty" colSpan={7}>
                               当前品牌还没有规则版本。
                             </td>
                           </tr>
@@ -539,7 +594,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                       <div className="eyebrow">当前版本操作台</div>
                       <h2 className="section-title">{selectedVersion?.version ?? "暂无版本"}</h2>
                       <div className="subtitle">
-                        {activeVersion ? `生效版本：${activeVersion.version}` : "当前没有生效版本"}
+                        {selectedVersion ? selectedVersion.targetLabel : "当前没有生效版本"}
                       </div>
                     </div>
                     <span className={`status-pill ${selectedVersionStatusTone}`}>
@@ -549,8 +604,16 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
 
                   <div className="brand-rule-meta-grid">
                     <div className="brand-rule-meta-card">
+                      <span>规则类型</span>
+                      <strong>{selectedVersion?.targetLabel ?? "无"}</strong>
+                    </div>
+                    <div className="brand-rule-meta-card">
                       <span>叠加版本</span>
                       <strong>{selectedVersion?.baseVersion || "无"}</strong>
+                    </div>
+                    <div className="brand-rule-meta-card">
+                      <span>关联 Core Rule</span>
+                      <strong>{selectedVersion?.parentVersion || "无"}</strong>
                     </div>
                     <div className="brand-rule-meta-card">
                       <span>创建时间</span>
@@ -667,8 +730,12 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
               <div className="content-grid-2">
                 <section className="panel content-panel">
                   <div className="split-line">
-                    <h2 className="section-title">设计规则说明</h2>
-                    <span className="tag">当前品牌：{data.selectedBrand.name}</span>
+                    <h2 className="section-title">
+                      {selectedVersion?.targetKey === "detail_page_layout" ? "详情页规则说明" : "品牌级规则说明"}
+                    </h2>
+                    <span className="tag">
+                      {selectedVersion?.targetLabel ?? `当前品牌：${data.selectedBrand.name}`}
+                    </span>
                   </div>
                   <div className="record-list">
                     {data.designRules.map((item) => (
@@ -681,7 +748,9 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                 </section>
 
                 <section className="panel content-panel">
-                  <h2 className="section-title">布局规则摘要</h2>
+                  <h2 className="section-title">
+                    {selectedVersion?.targetKey === "detail_page_layout" ? "页面布局 / 图片区域" : "品牌级布局倾向"}
+                  </h2>
                   <div className="record-list">
                     {data.layoutRules.map((item) => (
                       <div className="record-item" key={item.title}>
@@ -729,7 +798,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
             <div className="split-line">
               <div>
                 <h2 className="section-title">训练规则</h2>
-                <div className="subtitle">选择素材，决定是否叠加历史版本，再根据提示词生成新的品牌规则。</div>
+                <div className="subtitle">先选择训练目标，再决定是否叠加同类型历史版本，并生成新的规则版本。</div>
               </div>
               <button className="btn ghost" type="button" onClick={() => setTrainOpen(false)}>
                 关闭
@@ -762,6 +831,26 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
 
               <section className="record-item">
                 <strong>训练设置</strong>
+                <label className="field">
+                  <span className="field-label">训练目标</span>
+                  <select
+                    value={trainForm.trainingTarget}
+                    onChange={(event) =>
+                      setTrainForm((current) => ({
+                        ...current,
+                        trainingTarget: event.target.value as BrandRuleTarget,
+                        prompt: defaultPromptByTarget(event.target.value as BrandRuleTarget),
+                        baseVersionId: null,
+                        useBaseVersion: false,
+                        websiteUrls:
+                          event.target.value === "brand_core" ? current.websiteUrls : "",
+                      }))
+                    }
+                  >
+                    <option value="brand_core">品牌设计规范</option>
+                    <option value="detail_page_layout">详情页布局规范</option>
+                  </select>
+                </label>
                 <label className="switch rules-train-switch">
                   <input
                     checked={trainForm.useBaseVersion}
@@ -771,7 +860,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                         ...current,
                         useBaseVersion: event.target.checked,
                         baseVersionId: event.target.checked
-                          ? current.baseVersionId ?? data.selectedVersionId ?? data.versions[0]?.id ?? null
+                          ? current.baseVersionId ?? filteredTrainVersions[0]?.id ?? null
                           : current.baseVersionId,
                       }))
                     }
@@ -792,30 +881,34 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                     }
                   >
                     <option value="">不叠加，创建全新规则</option>
-                    {data.versions.map((version) => (
+                    {filteredTrainVersions.map((version) => (
                       <option key={version.id} value={version.id}>
-                        {version.version} {version.status === "active" ? "（当前）" : ""}
+                        {version.targetLabel} / {version.version} {version.status === "active" ? "（当前）" : ""}
                       </option>
                     ))}
                   </select>
                 </label>
-                <label className="field">
-                  <span className="field-label">官网 URL（每行一个）</span>
-                  <textarea
-                    value={trainForm.websiteUrls}
-                    onChange={(event) =>
-                      setTrainForm((current) => ({
-                        ...current,
-                        websiteUrls: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
+                {trainForm.trainingTarget === "brand_core" ? (
+                  <label className="field">
+                    <span className="field-label">官网 URL（每行一个）</span>
+                    <textarea
+                      value={trainForm.websiteUrls}
+                      onChange={(event) =>
+                        setTrainForm((current) => ({
+                          ...current,
+                          websiteUrls: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                ) : (
+                  <div className="hint">详情页布局规范主要从详情页素材中提取，不强依赖官网 URL。</div>
+                )}
               </section>
             </div>
 
             <label className="field">
-              <span className="field-label">训练规则提示词</span>
+              <span className="field-label">{currentTargetLabel}提示词</span>
               <textarea
                 className="prompt"
                 value={trainForm.prompt}
@@ -827,8 +920,8 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
 
             <div className="split-line">
               <div className="hint">
-                本次将基于 {trainForm.assetIds.length} 个素材
-                {trainForm.useBaseVersion ? "叠加所选历史版本" : "创建全新规则"}，生成后可继续手动修改。
+                本次将基于 {trainForm.assetIds.length} 个素材训练{currentTargetLabel}
+                {trainForm.useBaseVersion ? "，并叠加所选同类型历史版本" : "，创建全新规则"}。
               </div>
               <button className="btn primary" disabled={training} type="button" onClick={handleTrain}>
                 {training ? "训练中..." : "开始训练"}
@@ -900,6 +993,15 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                           ruleCount: 0,
                           layoutCount: 0,
                           promptCount: 0,
+                          ruleType: selectedVersion?.ruleType ?? "core",
+                          pageType: selectedVersion?.pageType ?? "brand_identity",
+                          sourceKind: selectedVersion?.sourceKind ?? "asset_batch",
+                          parentRuleId: selectedVersion?.parentRuleId ?? null,
+                          parentVersion: selectedVersion?.parentVersion ?? "",
+                          targetKey: selectedVersion?.targetKey ?? (data.selectedTargetKey ?? "brand_core"),
+                          targetLabel:
+                            selectedVersion?.targetLabel ??
+                            TARGET_LABELS[(data.selectedTargetKey ?? "brand_core") as BrandRuleTarget],
                         },
                         "edit",
                       )

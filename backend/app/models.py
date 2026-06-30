@@ -98,6 +98,8 @@ class WorkflowRequest(BaseModel):
     product_brief: str = ""
     brand_guidelines: str = ""
     reference_notes: str = ""
+    selected_core_rule_id: int | None = None
+    selected_detail_page_rule_id: int | None = None
     workflow_mode: WorkflowMode = WorkflowMode.smart_recommend
     output_types: list[OutputType] = Field(
         default_factory=lambda: [OutputType.detail_page]

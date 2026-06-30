@@ -80,7 +80,9 @@ const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
 
 interface WorkflowDraft {
   payload: WorkflowPayload;
-  selectedBrandRuleId: number | "";
+  selectedCoreRuleId?: number | "";
+  selectedDetailPageRuleId?: number | "";
+  selectedBrandRuleId?: number | "";
   updatedAt: string;
 }
 
@@ -156,7 +158,8 @@ export function PsdWorkflowApp() {
   const [brandRules, setBrandRules] = useState<BrandRuleOption[]>([]);
   const [brandRulesLoading, setBrandRulesLoading] = useState(false);
   const [brandRulesError, setBrandRulesError] = useState<string | null>(null);
-  const [selectedBrandRuleId, setSelectedBrandRuleId] = useState<number | "">("");
+  const [selectedCoreRuleId, setSelectedCoreRuleId] = useState<number | "">("");
+  const [selectedDetailPageRuleId, setSelectedDetailPageRuleId] = useState<number | "">("");
   const [draftReady, setDraftReady] = useState(false);
   const [draftMessage, setDraftMessage] = useState("正在检查草稿箱...");
   const [activeTab, setActiveTab] = useState<PageTab>("workflow");
@@ -175,7 +178,8 @@ export function PsdWorkflowApp() {
       .then((defaults) => {
         const draft = readWorkflowDraft();
         setPayload(draft ? mergeWorkflowDraft(defaults.payload, draft.payload) : defaults.payload);
-        setSelectedBrandRuleId(draft?.selectedBrandRuleId ?? "");
+        setSelectedCoreRuleId(draft?.selectedCoreRuleId ?? draft?.selectedBrandRuleId ?? "");
+        setSelectedDetailPageRuleId(draft?.selectedDetailPageRuleId ?? "");
         setDraftMessage(draft ? formatDraftTime(draft.updatedAt) : "暂无草稿，编辑后会自动保存");
         setDraftReady(true);
         if (defaults.stages?.length) setStages(defaults.stages);
@@ -197,7 +201,8 @@ export function PsdWorkflowApp() {
           WORKFLOW_DRAFT_KEY,
           JSON.stringify({
             payload: sanitizeWorkflowDraft(payload),
-            selectedBrandRuleId,
+            selectedCoreRuleId,
+            selectedDetailPageRuleId,
             updatedAt,
           }),
         );
@@ -209,7 +214,7 @@ export function PsdWorkflowApp() {
     return () => {
       if (draftSaveTimer.current) window.clearTimeout(draftSaveTimer.current);
     };
-  }, [draftReady, payload, selectedBrandRuleId]);
+  }, [draftReady, payload, selectedCoreRuleId, selectedDetailPageRuleId]);
 
   useEffect(() => {
     setBrandRulesLoading(true);
@@ -234,9 +239,26 @@ export function PsdWorkflowApp() {
 
   const timelineStages = loading || liveStages.length ? liveStages : result?.stages ?? [];
 
-  const selectedBrandRule = useMemo(
-    () => brandRules.find((rule) => rule.id === selectedBrandRuleId),
-    [brandRules, selectedBrandRuleId],
+  const selectedCoreRule = useMemo(
+    () => brandRules.find((rule) => rule.id === selectedCoreRuleId),
+    [brandRules, selectedCoreRuleId],
+  );
+  const selectedDetailPageRule = useMemo(
+    () => brandRules.find((rule) => rule.id === selectedDetailPageRuleId),
+    [brandRules, selectedDetailPageRuleId],
+  );
+  const coreRules = useMemo(
+    () => brandRules.filter((rule) => rule.targetKey === "brand_core"),
+    [brandRules],
+  );
+  const detailPageRules = useMemo(
+    () =>
+      brandRules.filter(
+        (rule) =>
+          rule.targetKey === "detail_page_layout" &&
+          (!selectedCoreRuleId || rule.brandId === selectedCoreRule?.brandId),
+      ),
+    [brandRules, selectedCoreRule, selectedCoreRuleId],
   );
 
   useEffect(() => {
@@ -319,13 +341,17 @@ export function PsdWorkflowApp() {
     );
 
   const applySelectedBrandRule = () => {
-    if (!selectedBrandRule) return;
+    if (!selectedCoreRule && !selectedDetailPageRule) return;
+    const sections = [
+      selectedCoreRule ? `## 品牌核心规则\n\n${selectedCoreRule.markdown}` : "",
+      selectedDetailPageRule ? `## 商品详情页规则\n\n${selectedDetailPageRule.markdown}` : "",
+    ].filter(Boolean);
     setPayload((current) =>
       current
         ? {
             ...current,
-            brand_name: selectedBrandRule.brandName,
-            brand_guidelines: selectedBrandRule.markdown,
+            brand_name: selectedCoreRule?.brandName ?? selectedDetailPageRule?.brandName ?? current.brand_name,
+            brand_guidelines: sections.join("\n\n---\n\n"),
           }
         : current,
     );
@@ -345,6 +371,12 @@ export function PsdWorkflowApp() {
 
   const handleGenerate = async () => {
     const runId = crypto.randomUUID();
+    const workflowPayload: WorkflowPayload = {
+      ...payload,
+      selected_core_rule_id: typeof selectedCoreRuleId === "number" ? selectedCoreRuleId : null,
+      selected_detail_page_rule_id:
+        typeof selectedDetailPageRuleId === "number" ? selectedDetailPageRuleId : null,
+    };
     setCurrentRunId(runId);
     setCurrentStageId(null);
     setSelectedStageId(null);
@@ -357,7 +389,7 @@ export function PsdWorkflowApp() {
     setResult(null);
     try {
       const workflowResult = await generateWorkflow(
-        payload,
+        workflowPayload,
         files,
         runId,
         briefFiles,
@@ -563,23 +595,43 @@ export function PsdWorkflowApp() {
                   onChange={(e) => setField("product_brief", e.target.value)}
                 />
               </Field>
-              <Field label="品牌规范 / Core Rule">
+              <Field label="品牌规范 / Core Rule + 详情页规则">
                 <div className="brand-rule-picker">
                   <select
-                    value={selectedBrandRuleId}
-                    disabled={brandRulesLoading || brandRules.length === 0}
+                    value={selectedCoreRuleId}
+                    disabled={brandRulesLoading || coreRules.length === 0}
                     onChange={(e) =>
-                      setSelectedBrandRuleId(e.target.value ? Number(e.target.value) : "")
+                      setSelectedCoreRuleId(e.target.value ? Number(e.target.value) : "")
                     }
                   >
                     <option value="">
                       {brandRulesLoading
                         ? "正在加载品牌规则版本..."
-                        : brandRules.length
-                          ? "选择已训练的品牌规则版本"
-                          : "暂无已训练品牌规则"}
+                        : coreRules.length
+                          ? "选择品牌设计规范 / Core Rule"
+                          : "暂无已训练品牌核心规则"}
                     </option>
-                    {brandRules.map((rule) => (
+                    {coreRules.map((rule) => (
+                      <option key={rule.id} value={rule.id}>
+                        {rule.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={selectedDetailPageRuleId}
+                    disabled={brandRulesLoading || detailPageRules.length === 0}
+                    onChange={(e) =>
+                      setSelectedDetailPageRuleId(e.target.value ? Number(e.target.value) : "")
+                    }
+                  >
+                    <option value="">
+                      {brandRulesLoading
+                        ? "正在加载详情页规则..."
+                        : detailPageRules.length
+                          ? "选择商品详情页 Derived Rule（可选）"
+                          : "暂无详情页布局规则"}
+                    </option>
+                    {detailPageRules.map((rule) => (
                       <option key={rule.id} value={rule.id}>
                         {rule.label}
                       </option>
@@ -587,16 +639,23 @@ export function PsdWorkflowApp() {
                   </select>
                   <button
                     className="btn ghost brand-rule-apply"
-                    disabled={!selectedBrandRule}
+                    disabled={!selectedCoreRule && !selectedDetailPageRule}
                     type="button"
                     onClick={applySelectedBrandRule}
                   >
-                    应用版本
+                    组合应用
                   </button>
                 </div>
-                {selectedBrandRule ? (
+                {selectedCoreRule || selectedDetailPageRule ? (
                   <p className="hint">
-                    将应用 {selectedBrandRule.brandName} / {selectedBrandRule.version} 到当前输入框。
+                    生成时会结构化注入
+                    {selectedCoreRule
+                      ? ` ${selectedCoreRule.brandName} / ${selectedCoreRule.version} 的 Core Rule`
+                      : ""}
+                    {selectedDetailPageRule
+                      ? ` ${selectedCoreRule ? "和" : ""} ${selectedDetailPageRule.brandName} / ${selectedDetailPageRule.version} 的详情页规则`
+                      : ""}
+                    ；点击“组合应用”只会把规则摘要填入当前输入框，方便你继续人工补充说明。
                   </p>
                 ) : brandRulesError ? (
                   <p className="hint">{brandRulesError}</p>
@@ -717,7 +776,7 @@ export function PsdWorkflowApp() {
 
             <Section
               title="模型参数"
-              description="统一由 config/workflow-gpt.json 管理，页面内只读展示"
+              description="统一由后端配置文件管理，页面内只读展示"
               icon={<Cpu size={16} />}
             >
               <div className="grid-2">
@@ -795,7 +854,9 @@ export function PsdWorkflowApp() {
               </div>
               <p className="hint">
                 当前页面不会修改系统模型配置，所有大模型调用统一读取
-                `config/workflow-gpt.json` 的 `model_config`。
+                `config/workflow-defaults.json` /
+                `config/workflow-defaults.local.json` 的 `model_config`，
+                若存在 `config/workflow-gpt.json` 则会再覆盖其同名字段。
               </p>
               <label className="switch">
                 <input
@@ -974,7 +1035,8 @@ export function PsdWorkflowApp() {
                 setResult(null);
                 setError(null);
                 skipNextDraftSave.current = true;
-                setSelectedBrandRuleId("");
+                setSelectedCoreRuleId("");
+                setSelectedDetailPageRuleId("");
                 window.localStorage.removeItem(WORKFLOW_DRAFT_KEY);
                 setDraftMessage("草稿已清空，将使用默认配置");
                 fetchDefaults().then((d) => setPayload(d.payload)).catch(() => {});

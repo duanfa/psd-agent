@@ -12,8 +12,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import database
-from .defaults import load_system_model_config, load_workflow_defaults
-from .llm import LLMClient, LLMUnavailable, resolve_base_url
+from .defaults import (
+    describe_system_model_config_source,
+    load_system_model_config,
+    load_workflow_defaults,
+)
+from .llm import LLMClient, LLMUnavailable, resolve_api_key, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
 from .render import build_design_spec, write_artifacts
@@ -31,6 +35,7 @@ class TrainBrandRuleRequest(BaseModel):
     website_urls: list[str] = []
     base_version_id: int | None = None
     client_run_id: str | None = None
+    training_target: str = "brand_core"
 
 
 class UpdateBrandRuleMarkdownRequest(BaseModel):
@@ -222,8 +227,8 @@ def model_test_config() -> ModelTestConfigResponse:
         max_tokens=settings.max_tokens,
         enable_vision=settings.enable_vision,
         max_vision_images=settings.max_vision_images,
-        has_api_key=bool(settings.api_key),
-        source_path="config/workflow-gpt.json",
+        has_api_key=bool(resolve_api_key(settings)),
+        source_path=describe_system_model_config_source(),
     )
 
 
@@ -337,7 +342,9 @@ def _brand_rule_model_result(
         brand_id=payload.brand_id,
         asset_ids=payload.asset_ids,
         base_version_id=payload.base_version_id,
+        training_target=payload.training_target,
     )
+    target_meta = context["targetMeta"]
     defaults = load_workflow_defaults()
     request_defaults = WorkflowRequest.model_validate(defaults)
     settings = request_defaults.model_settings
@@ -372,6 +379,8 @@ def _brand_rule_model_result(
 
     model_payload = {
         "brand": context["brand"],
+        "training_target": payload.training_target,
+        "training_target_label": target_meta["label"],
         "selected_assets": [
             {
                 "id": asset["id"],
@@ -385,10 +394,11 @@ def _brand_rule_model_result(
             for asset in context["assets"]
         ],
         "base_rule": context["baseRule"],
+        "linked_core_rule": context["linkedCoreRule"],
         "website_urls": payload.website_urls,
         "training_prompt": payload.prompt,
         "output_schema": {
-            "markdown": "完整品牌规则 Markdown",
+            "markdown": f"完整 {target_meta['label']} Markdown",
             "design_rules": [{"title": "规则标题", "description": "规则说明"}],
             "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
             "components": [{"title": "组件标题", "description": "组件说明"}],
@@ -397,21 +407,37 @@ def _brand_rule_model_result(
     }
     append_log(run_id, "BrandRuleTrain", "训练输入上下文", model_payload)
 
-    set_run_state(run_id, "running", "vision_model", "多模态模型提取品牌规范", "sparkles")
-    system_prompt = (
-        "你是 BrandOS 的品牌规则训练 Agent。必须基于用户勾选的素材、素材文本、官网 URL、"
-        "可见图片内容和可选历史版本，提取可复用的品牌规范。"
-        "如果提供历史版本，需要明确区分保留规则和新增补充。"
-        "请输出可直接入库的 JSON。"
-    )
-    user_prompt = (
-        "请根据以下 JSON 上下文生成品牌规则。要求：\n"
-        "1. 认真阅读 selected_assets，每个素材都要在 source_assets 中有提炼结果。\n"
-        "2. 若 base_rule 不为空，叠加历史版本并说明新增规范；若为空，创建全新规则。\n"
-        "3. markdown 要包含：训练输入、素材摘要、视觉规范、布局规则、组件规则、文案语气、禁用项、可用于详情页生成的 Core Rule。\n"
-        "4. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
-        f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
-    )
+    set_run_state(run_id, "running", "vision_model", f"多模态模型提取{target_meta['label']}", "sparkles")
+    if payload.training_target == "detail_page_layout":
+        system_prompt = (
+            "你是 BrandOS 的详情页布局规则训练 Agent。必须基于用户勾选的详情页素材、素材文本、"
+            "可见图片内容、可选历史详情页规则和关联品牌核心规则，提取可复用的商品详情页 Derived Rule。"
+            "如果提供历史版本，需要明确区分保留规则和新增补充。请输出可直接入库的 JSON。"
+        )
+        user_prompt = (
+            "请根据以下 JSON 上下文生成详情页布局规则。要求：\n"
+            "1. 认真阅读 selected_assets，每个素材都要在 source_assets 中有提炼结果。\n"
+            "2. 若 base_rule 不为空，叠加历史详情页规则并说明新增模块；若为空，创建全新详情页规则。\n"
+            "3. markdown 要包含：训练输入、素材摘要、页面结构、文字排版层级、图片放置区域、留白与栅格、组件模板、禁用项。\n"
+            "4. layout_rules 必须明确描述主图区、卖点图区、参数/对比区、CTA 区等位置或比例关系。\n"
+            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
+        )
+    else:
+        system_prompt = (
+            "你是 BrandOS 的品牌设计规范训练 Agent。必须基于用户勾选的素材、素材文本、官网 URL、"
+            "可见图片内容和可选历史品牌规则，提取可复用的品牌级 Core Rule。"
+            "如果提供历史版本，需要明确区分保留规则和新增补充。请输出可直接入库的 JSON。"
+        )
+        user_prompt = (
+            "请根据以下 JSON 上下文生成品牌设计规范。要求：\n"
+            "1. 认真阅读 selected_assets，每个素材都要在 source_assets 中有提炼结果。\n"
+            "2. 若 base_rule 不为空，叠加历史品牌规则并说明新增规范；若为空，创建全新品牌核心规则。\n"
+            "3. markdown 要包含：训练输入、素材摘要、品牌视觉规范、色彩/字体/语气、禁用项、供页面规则继承的品牌级布局倾向。\n"
+            "4. 不要把具体商品详情页模块当成唯一模板写死在 Core Rule 中。\n"
+            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
+        )
     try:
         result = llm.invoke_vision_json(system_prompt, user_prompt, image_paths)
     except LLMUnavailable as exc:
@@ -436,6 +462,7 @@ def train_brand_rules(payload: TrainBrandRuleRequest) -> dict[str, object]:
             website_urls=payload.website_urls,
             base_version_id=payload.base_version_id,
             model_result=model_result,
+            training_target=payload.training_target,
         )
         append_log(run_id, "BrandRuleTrain", "品牌规则版本已保存", result)
         return result
@@ -752,6 +779,16 @@ def generate_workflow(
         request = WorkflowRequest.model_validate(_merge_payload(incoming))
     except (json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        selected_rule_context = database.get_workflow_rule_context(
+            core_rule_id=request.selected_core_rule_id,
+            detail_page_rule_id=request.selected_detail_page_rule_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if selected_rule_context.get("brandName"):
+        request.brand_name = str(selected_rule_context["brandName"])
 
     run_id = _safe_run_id(client_run_id)
     CANCELLED_RUNS.discard(run_id)
@@ -800,6 +837,7 @@ def generate_workflow(
             assets,
             run_id=run_id,
             cancel_checker=lambda: run_id in CANCELLED_RUNS,
+            selected_rule_context=selected_rule_context,
         )
     except WorkflowCancelled as exc:
         CANCELLED_RUNS.discard(run_id)

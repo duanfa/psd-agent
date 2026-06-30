@@ -89,6 +89,8 @@ export interface WorkflowPayload {
   product_brief: string;
   brand_guidelines: string;
   reference_notes: string;
+  selected_core_rule_id?: number | null;
+  selected_detail_page_rule_id?: number | null;
   workflow_mode: WorkflowMode;
   output_types: OutputType[];
   model_config: ModelConfig;
@@ -265,6 +267,9 @@ export interface BrandRulesPageResponse {
     status: string;
     version: string;
     ruleCount: number;
+    coreVersion?: string;
+    detailPageVersion?: string;
+    totalVersions?: number;
   }>;
   selectedBrand: { id: number; name: string };
   overview: Array<{
@@ -285,10 +290,26 @@ export interface BrandRulesPageResponse {
     ruleCount: number;
     layoutCount: number;
     promptCount: number;
+    ruleType: string;
+    pageType: string;
+    sourceKind: string;
+    parentRuleId?: number | null;
+    parentVersion?: string;
+    targetKey: BrandRuleTarget;
+    targetLabel: string;
   }>;
   selectedVersionId?: number | null;
   markdown: string;
   trainingPrompt: string;
+  selectedTargetKey?: BrandRuleTarget;
+  activeVersions?: Partial<Record<BrandRuleTarget, BrandRuleVersionSummary | null>>;
+  targetSummaries?: Array<{
+    targetKey: BrandRuleTarget;
+    label: string;
+    summary: string;
+    count: number;
+    activeVersion: string;
+  }>;
   sourceAssets: Array<{
     id: number;
     name: string;
@@ -297,6 +318,26 @@ export interface BrandRulesPageResponse {
   }>;
   websiteUrls: string[];
   emptyState: string;
+}
+
+export type BrandRuleTarget = "brand_core" | "detail_page_layout";
+
+export interface BrandRuleVersionSummary {
+  id: number;
+  version: string;
+  status: string;
+  createdAt?: string | null;
+  baseVersion: string;
+  ruleCount: number;
+  layoutCount: number;
+  promptCount: number;
+  ruleType: string;
+  pageType: string;
+  sourceKind: string;
+  parentRuleId?: number | null;
+  parentVersion?: string;
+  targetKey: BrandRuleTarget;
+  targetLabel: string;
 }
 
 export interface BrandRuleOption {
@@ -308,12 +349,16 @@ export interface BrandRuleOption {
   ruleCount: number;
   markdown: string;
   updatedAt?: string | null;
+  targetKey: BrandRuleTarget;
+  targetLabel: string;
+  ruleType: string;
+  pageType: string;
   label: string;
 }
 
 export interface BrandRuleDiffResponse {
-  base: { id: number; version: string; status: string };
-  compare: { id: number; version: string; status: string };
+  base: { id: number; version: string; status: string; targetKey: BrandRuleTarget };
+  compare: { id: number; version: string; status: string; targetKey: BrandRuleTarget };
   diff: Record<
     string,
     {
@@ -476,6 +521,8 @@ export async function fetchBrandRulesPageWithFilters(filters: {
 
 export async function fetchBrandRuleOptions(): Promise<{
   rules: BrandRuleOption[];
+  coreRules: BrandRuleOption[];
+  detailPageRules: BrandRuleOption[];
 }> {
   return fetchJson("/api/brand-rules/options");
 }
@@ -485,9 +532,10 @@ export async function trainBrandRules(input: {
   assetIds: number[];
   prompt: string;
   websiteUrls: string[];
+  trainingTarget: BrandRuleTarget;
   baseVersionId?: number | null;
   clientRunId?: string;
-}): Promise<{ id: number; version: string; markdown: string }> {
+}): Promise<{ id: number; version: string; markdown: string; targetKey: BrandRuleTarget }> {
   const response = await fetch(`${API_BASE}/api/brand-rules/train`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -496,6 +544,7 @@ export async function trainBrandRules(input: {
       asset_ids: input.assetIds,
       prompt: input.prompt,
       website_urls: input.websiteUrls,
+      training_target: input.trainingTarget,
       base_version_id: input.baseVersionId ?? null,
       client_run_id: input.clientRunId ?? null,
     }),

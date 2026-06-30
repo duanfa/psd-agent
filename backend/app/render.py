@@ -14,9 +14,123 @@ from .pipeline import PipelineContext, summarize_assets
 IMAGE_BUCKETS = {"image", "reference_image"}
 
 
+def _layout_variant(module: dict[str, Any]) -> str:
+    layout = str(module.get("layout") or "").lower()
+    role = str(module.get("role") or "")
+    if "right_text_left_image" in layout:
+        return "right_text_left_image"
+    if "left_text_right_image" in layout:
+        return "left_text_right_image"
+    if "full_bleed_scene" in layout:
+        return "full_bleed_scene"
+    if "detail_zoom" in layout:
+        return "detail_zoom"
+    if "three_column_cards" in layout:
+        return "three_column_cards"
+    if "spec_table" in layout:
+        return "spec_table"
+    if "centered_hero" in layout:
+        return "centered_hero"
+    if "hero" in layout and "split" in layout:
+        return "hero_split"
+    if role == "scenario":
+        return "full_bleed_scene"
+    if role == "parameter":
+        return "spec_table"
+    if role == "technology":
+        return "detail_zoom"
+    if role == "hero":
+        return "hero_split"
+    return "left_text_right_image"
+
+
+def _module_render_plan(module: dict[str, Any], canvas_width: int) -> dict[str, Any]:
+    variant = _layout_variant(module)
+    height = int(module.get("height") or 820)
+    pad = 40
+    text = {"x": pad, "y": 48, "w": canvas_width - pad * 2, "align": "left"}
+    image = {"enabled": module.get("role") not in ("brand_story", "cta"), "x": 0, "y": 0, "w": 0, "h": 0}
+    point_style = "list"
+    bg_style = "card"
+
+    if variant == "centered_hero":
+        text = {"x": 80, "y": 64, "w": canvas_width - 160, "align": "center"}
+        image = {
+            "enabled": image["enabled"],
+            "x": 60,
+            "y": max(180, int(height * 0.22)),
+            "w": canvas_width - 120,
+            "h": max(220, int(height * 0.58)),
+        }
+    elif variant in ("hero_split", "left_text_right_image", "detail_zoom"):
+        text_width = int(canvas_width * (0.34 if variant == "detail_zoom" else 0.36))
+        text = {"x": pad, "y": 56, "w": text_width, "align": "left"}
+        image = {
+            "enabled": image["enabled"],
+            "x": pad + text_width + 28,
+            "y": 54 if variant == "hero_split" else 92,
+            "w": canvas_width - (pad + text_width + 28) - pad,
+            "h": height - (110 if variant == "hero_split" else 140),
+        }
+    elif variant == "right_text_left_image":
+        text_width = int(canvas_width * 0.36)
+        image_width = canvas_width - pad * 2 - text_width - 28
+        image = {
+            "enabled": image["enabled"],
+            "x": pad,
+            "y": 92,
+            "w": image_width,
+            "h": height - 140,
+        }
+        text = {"x": pad + image_width + 28, "y": 56, "w": text_width, "align": "left"}
+    elif variant == "full_bleed_scene":
+        text = {"x": 56, "y": max(72, height - 210), "w": int(canvas_width * 0.42), "align": "left"}
+        image = {
+            "enabled": image["enabled"],
+            "x": 0,
+            "y": 0,
+            "w": canvas_width,
+            "h": height,
+        }
+        bg_style = "scene"
+    elif variant == "three_column_cards":
+        text = {"x": pad, "y": 52, "w": canvas_width - pad * 2, "align": "left"}
+        image = {
+            "enabled": image["enabled"],
+            "x": pad,
+            "y": 126,
+            "w": canvas_width - pad * 2,
+            "h": max(180, int(height * 0.34)),
+        }
+        point_style = "cards"
+    elif variant == "spec_table":
+        text = {"x": pad, "y": 52, "w": int(canvas_width * 0.4), "align": "left"}
+        image = {
+            "enabled": image["enabled"],
+            "x": canvas_width - pad - int(canvas_width * 0.28),
+            "y": 70,
+            "w": int(canvas_width * 0.28),
+            "h": max(180, int(height * 0.34)),
+        }
+        point_style = "table"
+
+    return {
+        "variant": variant,
+        "background": bg_style,
+        "text": text,
+        "image": image,
+        "point_style": point_style,
+        "padding": pad,
+    }
+
+
 def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
     req = ctx.request
-    modules = ctx.modules
+    modules = []
+    for module in ctx.modules:
+        enriched = dict(module)
+        enriched["render_plan"] = _module_render_plan(enriched, req.layout.canvas_width)
+        modules.append(enriched)
     total_height = sum(int(m["height"]) for m in modules) or req.layout.hero_height
     return {
         "project": {
@@ -38,6 +152,10 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
         "product_info": ctx.product_info,
         "structured_info": ctx.structured_info,
         "brand_profile": ctx.brand_profile,
+        "selected_rules": {
+            "core_rule": ctx.core_rule,
+            "detail_page_rule": ctx.detail_page_rule,
+        },
         "design_direction": ctx.design_direction,
         "modules": modules,
         "psd_layers": ctx.psd_layers,
@@ -132,92 +250,149 @@ def render_preview_svg(spec: dict[str, Any], output_dir: Path | None = None) -> 
         f'<rect x="0" y="0" width="{width}" height="{height}" fill="{bg}" />'
     ]
     y = 0
-    pad = 40
     for module in spec["modules"]:
         h = int(module["height"])
         copy = module.get("copy", {})
-        role = module.get("role", "feature")
-        card_bg = "#ffffff" if module["index"] % 2 else "#f4f6f8"
+        plan = module.get("render_plan") or {}
+        text_plan = plan.get("text") or {"x": 40, "y": 48, "w": width - 80, "align": "left"}
+        image_plan = plan.get("image") or {"enabled": False, "x": 0, "y": 0, "w": 0, "h": 0}
+        point_style = str(plan.get("point_style") or "list")
+        bg_style = str(plan.get("background") or "card")
+        align = str(text_plan.get("align") or "left")
+        text_anchor = "middle" if align == "center" else "start"
+
+        if bg_style == "scene":
+            blocks.append(f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="#dbe3ea" />')
+            blocks.append(
+                f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="url(#sceneShade-{module["index"]})" opacity="0.55" />'
+            )
+            blocks.append(
+                f'<defs><linearGradient id="sceneShade-{module["index"]}" x1="0" y1="0" x2="0" y2="1">'
+                f'<stop offset="0%" stop-color="#0f172a" stop-opacity="0.04" />'
+                f'<stop offset="100%" stop-color="#0f172a" stop-opacity="0.45" />'
+                f"</linearGradient></defs>"
+            )
+        else:
+            card_bg = "#ffffff" if module["index"] % 2 else "#f4f6f8"
+            blocks.append(f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="{card_bg}" />')
+
+        accent_x = int(text_plan.get("x", 40)) - 16
+        accent_y = y + max(26, int(text_plan.get("y", 48)) - 28)
         blocks.append(
-            f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="{card_bg}" />'
+            f'<rect x="{accent_x}" y="{accent_y}" width="6" height="40" rx="3" fill="{accent}" />'
         )
+
+        title_x = int(text_plan.get("x", 40)) if align != "center" else int(text_plan.get("x", 40)) + int(text_plan.get("w", width - 80)) // 2
+        title_y = y + int(text_plan.get("y", 48))
         blocks.append(
-            f'<rect x="{pad - 16}" y="{y + 30}" width="6" height="40" rx="3" fill="{accent}" />'
-        )
-        blocks.append(
-            f'<text x="{pad}" y="{y + 64}" font-size="{title_size}" font-weight="700" '
+            f'<text x="{title_x}" y="{title_y}" text-anchor="{text_anchor}" '
+            f'font-size="{title_size}" font-weight="700" '
             f'font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="{title_color}">'
             f"{_esc(copy.get('headline', module['name']))}</text>"
         )
-        cursor = y + 64 + 30
+        cursor = title_y + 30
         if copy.get("subtitle"):
             blocks.append(
-                f'<text x="{pad}" y="{cursor}" font-size="{body_size + 3}" '
+                f'<text x="{title_x}" y="{cursor}" text-anchor="{text_anchor}" font-size="{body_size + 3}" '
                 f'font-family="PingFang SC, sans-serif" fill="{accent}">{_esc(copy["subtitle"])}</text>'
             )
             cursor += 30
 
-        # 图片区：优先嵌入实际上传素材，否则显示占位
-        img_top = cursor + 6
-        img_bottom = y + h - 36
-        if role not in ("brand_story", "cta") and img_bottom - img_top > 80:
-            img_x = int(width * 0.40)
-            img_w = width - img_x - pad
-            img_h = img_bottom - img_top
+        if image_plan.get("enabled") and int(image_plan.get("w", 0)) > 80 and int(image_plan.get("h", 0)) > 80:
+            img_x = int(image_plan.get("x", 0))
+            img_y = y + int(image_plan.get("y", 0))
+            img_w = int(image_plan.get("w", 0))
+            img_h = int(image_plan.get("h", 0))
             image_file = module.get("image_file")
-            data_url = (
-                _image_data_url(output_dir, image_file)
-                if output_dir and image_file
-                else None
-            )
+            data_url = _image_data_url(output_dir, image_file) if output_dir and image_file else None
             if data_url:
                 blocks.append(
                     f'<clipPath id="clip-{module["index"]}">'
-                    f'<rect x="{img_x}" y="{img_top}" width="{img_w}" height="{img_h}" rx="18" />'
+                    f'<rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" rx="18" />'
                     f"</clipPath>"
                 )
                 blocks.append(
-                    f'<image x="{img_x}" y="{img_top}" width="{img_w}" height="{img_h}" '
+                    f'<image x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
                     f'href="{data_url}" preserveAspectRatio="xMidYMid slice" '
                     f'clip-path="url(#clip-{module["index"]})" />'
                 )
-                blocks.append(
-                    f'<rect x="{img_x}" y="{img_top}" width="{img_w}" height="{img_h}" '
-                    f'rx="18" fill="none" stroke="#cbd5e1" />'
-                )
+                if bg_style == "scene":
+                    blocks.append(
+                        f'<rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
+                        f'rx="18" fill="#0f172a" opacity="0.18" />'
+                    )
+                else:
+                    blocks.append(
+                        f'<rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
+                        f'rx="18" fill="none" stroke="#cbd5e1" />'
+                    )
             else:
+                placeholder_fill = bg if bg_style != "scene" else "#cbd5e1"
                 blocks.append(
-                    f'<rect x="{img_x}" y="{img_top}" width="{img_w}" height="{img_h}" '
-                    f'rx="18" fill="{bg}" stroke="#cbd5e1" stroke-dasharray="9 7" />'
+                    f'<rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
+                    f'rx="18" fill="{placeholder_fill}" stroke="#cbd5e1" stroke-dasharray="9 7" />'
                 )
                 label = module.get("image_role") or "图片 / 素材占位"
                 blocks.append(
-                    f'<text x="{img_x + 22}" y="{img_top + 34}" font-size="14" '
+                    f'<text x="{img_x + 22}" y="{img_y + 34}" font-size="14" '
                     f'font-family="sans-serif" fill="#94a3b8">{_esc(label)}</text>'
                 )
-            text_width = img_x - pad - 8
-        else:
-            text_width = width - pad * 2
 
         char_w = max(8, int(body_size * 0.62))
-        wrap_chars = max(10, text_width // char_w)
+        wrap_chars = max(10, int(text_plan.get("w", width - 80)) // char_w)
         body_lines = _wrap(copy.get("body", ""), wrap_chars)
+        body_color = "#e2e8f0" if bg_style == "scene" else "#4b5563"
+        point_color = "#f8fafc" if bg_style == "scene" else "#374151"
         for line in body_lines:
             blocks.append(
-                f'<text x="{pad}" y="{cursor + 24}" font-size="{body_size}" '
-                f'font-family="PingFang SC, sans-serif" fill="#4b5563">{_esc(line)}</text>'
+                f'<text x="{title_x}" y="{cursor + 24}" text-anchor="{text_anchor}" font-size="{body_size}" '
+                f'font-family="PingFang SC, sans-serif" fill="{body_color}">{_esc(line)}</text>'
             )
             cursor += int(body_size * 1.7)
 
-        for point in copy.get("points", [])[:5]:
-            blocks.append(
-                f'<circle cx="{pad + 4}" cy="{cursor + 14}" r="3" fill="{accent}" />'
-            )
-            blocks.append(
-                f'<text x="{pad + 16}" y="{cursor + 19}" font-size="{body_size}" '
-                f'font-family="PingFang SC, sans-serif" fill="#374151">{_esc(point)}</text>'
-            )
-            cursor += int(body_size * 1.9)
+        points = copy.get("points", [])[:5]
+        if point_style == "cards":
+            card_y = y + h - 120
+            gap = 16
+            card_w = max(100, (width - 80 - gap * (max(1, len(points)) - 1)) // max(1, len(points)))
+            card_x = 40
+            for point in points:
+                blocks.append(
+                    f'<rect x="{card_x}" y="{card_y}" width="{card_w}" height="72" rx="14" fill="#ffffff" stroke="#dbe3ea" />'
+                )
+                wrapped = _wrap(str(point), max(6, (card_w - 24) // char_w))[:2]
+                for line_index, line in enumerate(wrapped):
+                    blocks.append(
+                        f'<text x="{card_x + 16}" y="{card_y + 28 + line_index * 18}" font-size="{body_size - 1}" '
+                        f'font-family="PingFang SC, sans-serif" fill="#334155">{_esc(line)}</text>'
+                    )
+                card_x += card_w + gap
+        elif point_style == "table":
+            table_x = int(text_plan.get("x", 40))
+            table_y = max(cursor + 20, y + 156)
+            row_h = 34
+            table_w = int(text_plan.get("w", width * 0.4))
+            for row_index, point in enumerate(points):
+                row_y = table_y + row_index * row_h
+                row_fill = "#ffffff" if row_index % 2 == 0 else "#f8fafc"
+                blocks.append(
+                    f'<rect x="{table_x}" y="{row_y}" width="{table_w}" height="{row_h - 2}" '
+                    f'rx="8" fill="{row_fill}" stroke="#dbe3ea" />'
+                )
+                blocks.append(
+                    f'<text x="{table_x + 14}" y="{row_y + 22}" font-size="{body_size}" '
+                    f'font-family="PingFang SC, sans-serif" fill="#334155">{_esc(point)}</text>'
+                )
+        else:
+            for point in points:
+                blocks.append(
+                    f'<circle cx="{int(text_plan.get("x", 40)) + 4}" cy="{cursor + 14}" r="3" fill="{accent}" />'
+                )
+                blocks.append(
+                    f'<text x="{int(text_plan.get("x", 40)) + 16}" y="{cursor + 19}" font-size="{body_size}" '
+                    f'font-family="PingFang SC, sans-serif" fill="{point_color}">{_esc(point)}</text>'
+                )
+                cursor += int(body_size * 1.9)
 
         y += h
 
@@ -268,19 +443,28 @@ var bodySize = Math.max(12, spec.typography.body_size + 2);
 for (var i = 0; i < spec.modules.length; i++) {
   var m = spec.modules[i];
   var copy = m.copy || {};
+  var plan = m.render_plan || {};
+  var textPlan = plan.text || { x: 40, y: 60, w: spec.canvas.width - 80 };
+  var imagePlan = plan.image || { enabled: false, x: 0, y: 0, w: 0, h: 0 };
   var group = doc.layerSets.add();
   group.name = m.layer_group;
 
-  addText(group, "TXT_主标题", copy.headline, 40, y + 60, titleSize + 6, spec.typography.text_color);
-  addText(group, "TXT_副标题", copy.subtitle, 40, y + 110, spec.typography.subtitle_size, spec.canvas.accent_color);
-  addText(group, "TXT_正文", copy.body, 40, y + 150, bodySize, "#4b5563");
+  addText(group, "TXT_主标题", copy.headline, textPlan.x, y + textPlan.y, titleSize + 6, spec.typography.text_color);
+  addText(group, "TXT_副标题", copy.subtitle, textPlan.x, y + textPlan.y + 50, spec.typography.subtitle_size, spec.canvas.accent_color);
+  addText(group, "TXT_正文", copy.body, textPlan.x, y + textPlan.y + 92, bodySize, "#4b5563");
 
   var points = copy.points || [];
   for (var p = 0; p < points.length; p++) {
-    addText(group, "TXT_要点" + (p + 1), "· " + points[p], 40, y + 190 + p * 28, bodySize, "#374151");
+    if ((plan.point_style || "list") === "cards") {
+      addText(group, "TXT_要点" + (p + 1), points[p], 40 + p * 180, y + m.height - 60, bodySize, "#374151");
+    } else if ((plan.point_style || "list") === "table") {
+      addText(group, "TXT_要点" + (p + 1), points[p], textPlan.x, y + 180 + p * 34, bodySize, "#374151");
+    } else {
+      addText(group, "TXT_要点" + (p + 1), "· " + points[p], textPlan.x, y + textPlan.y + 132 + p * 28, bodySize, "#374151");
+    }
   }
 
-  if (m.image_file) {
+  if (imagePlan.enabled && m.image_file) {
     var scriptFile = new File($.fileName);
     var imageFile = new File(scriptFile.parent.fsName + "/" + m.image_file);
     if (imageFile.exists) {
@@ -288,10 +472,10 @@ for (var i = 0; i < spec.modules.length; i++) {
       try {
         var imgLayer = imgDoc.activeLayer.duplicate(group, ElementPlacement.INSIDE);
         imgLayer.name = "IMG_" + (m.image_role || "图片");
-        var imgX = Math.round(spec.canvas.width * 0.40);
-        var imgTop = y + 150;
-        var imgW = spec.canvas.width - imgX - 40;
-        var imgH = m.height - 190;
+        var imgX = imagePlan.x;
+        var imgTop = y + imagePlan.y;
+        var imgW = imagePlan.w;
+        var imgH = imagePlan.h;
         if (imgH > 80) {
           var bounds = imgLayer.bounds;
           var layerW = bounds[2].as("px") - bounds[0].as("px");
@@ -311,7 +495,7 @@ for (var i = 0; i < spec.modules.length; i++) {
       missing.name = "IMG_MISSING_" + (m.image_role || "图片");
       missing.move(group, ElementPlacement.INSIDE);
     }
-  } else {
+  } else if (imagePlan.enabled) {
     var placeholder = doc.artLayers.add();
     placeholder.name = "IMG_" + (m.image_role || "图片占位");
     placeholder.move(group, ElementPlacement.INSIDE);
@@ -352,7 +536,13 @@ async function main() {
     section.resize(spec.canvas.width, module.height);
     section.x = 0;
     section.y = y;
-    section.fills = [{ type: "SOLID", color: hexToRgb(module.index %% 2 ? "#ffffff" : "#f4f6f8") }];
+    const plan = module.render_plan || {};
+    const textPlan = plan.text || { x: 40, y: 64, w: spec.canvas.width - 80, align: "left" };
+    const imagePlan = plan.image || { enabled: false, x: 0, y: 0, w: 0, h: 0 };
+    const bgColor = (plan.background || "card") === "scene"
+      ? "#dbe3ea"
+      : (module.index %% 2 ? "#ffffff" : "#f4f6f8");
+    section.fills = [{ type: "SOLID", color: hexToRgb(bgColor) }];
     frame.appendChild(section);
 
     const accent = figma.createRectangle();
@@ -365,19 +555,23 @@ async function main() {
     section.appendChild(accent);
 
     const copy = module.copy || {};
-    addText(section, "TXT_主标题", copy.headline || module.name, 40, 64, spec.typography.title_size + 8, true, spec.typography.text_color);
-    addText(section, "TXT_副标题", copy.subtitle || "", 40, 112, spec.typography.subtitle_size + 2, false, spec.canvas.accent_color);
-    addText(section, "TXT_正文", copy.body || "", 40, 154, Math.max(14, spec.typography.body_size + 4), false, "#4b5563");
+    addText(section, "TXT_主标题", copy.headline || module.name, textPlan.x, textPlan.y, spec.typography.title_size + 8, true, spec.typography.text_color);
+    addText(section, "TXT_副标题", copy.subtitle || "", textPlan.x, textPlan.y + 48, spec.typography.subtitle_size + 2, false, spec.canvas.accent_color);
+    addText(section, "TXT_正文", copy.body || "", textPlan.x, textPlan.y + 90, Math.max(14, spec.typography.body_size + 4), false, "#4b5563");
     (copy.points || []).slice(0, 5).forEach((point: string, index: number) => {
-      addText(section, `TXT_要点${index + 1}`, `• ${point}`, 40, 204 + index * 28, Math.max(14, spec.typography.body_size + 4), false, "#374151");
+      const pointStyle = plan.point_style || "list";
+      const pointX = pointStyle === "cards" ? 40 + index * 180 : textPlan.x;
+      const pointY = pointStyle === "cards" ? module.height - 60 : (pointStyle === "table" ? 190 + index * 34 : textPlan.y + 140 + index * 28);
+      const pointText = pointStyle === "list" ? `• ${point}` : point;
+      addText(section, `TXT_要点${index + 1}`, pointText, pointX, pointY, Math.max(14, spec.typography.body_size + 4), false, "#374151");
     });
 
-    if (module.role !== "brand_story" && module.role !== "cta") {
+    if (imagePlan.enabled) {
       const imageBox = figma.createRectangle();
       imageBox.name = `IMG_${module.image_role || "图片占位"}${module.image_file ? ` / ${module.image_file}` : ""}`;
-      imageBox.x = Math.round(spec.canvas.width * 0.4);
-      imageBox.y = 150;
-      imageBox.resize(spec.canvas.width - imageBox.x - 40, Math.max(120, module.height - 190));
+      imageBox.x = imagePlan.x;
+      imageBox.y = imagePlan.y;
+      imageBox.resize(Math.max(120, imagePlan.w), Math.max(120, imagePlan.h));
       imageBox.cornerRadius = 18;
       imageBox.fills = [{ type: "SOLID", color: hexToRgb("#e2e8f0") }];
       imageBox.strokes = [{ type: "SOLID", color: hexToRgb("#cbd5e1") }];

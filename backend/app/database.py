@@ -131,8 +131,73 @@ class BrandRule(Base):
     source_asset_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
     website_urls: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     base_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    rule_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    page_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_rule_id: Mapped[int | None] = mapped_column(ForeignKey("brand_rules.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+RULE_TYPE_CORE = "core"
+RULE_TYPE_DERIVED = "derived"
+PAGE_TYPE_BRAND_IDENTITY = "brand_identity"
+PAGE_TYPE_DETAIL_PAGE = "detail_page"
+SOURCE_KIND_WEBSITE = "website"
+SOURCE_KIND_ASSET_BATCH = "asset_batch"
+RULE_TARGET_BRAND_CORE = "brand_core"
+RULE_TARGET_DETAIL_PAGE_LAYOUT = "detail_page_layout"
+
+RULE_TARGET_META: dict[str, dict[str, str]] = {
+    RULE_TARGET_BRAND_CORE: {
+        "label": "品牌设计规范",
+        "rule_type": RULE_TYPE_CORE,
+        "page_type": PAGE_TYPE_BRAND_IDENTITY,
+        "source_kind": SOURCE_KIND_WEBSITE,
+        "summary": "官网素材沉淀品牌级视觉约束、字体色彩和品牌语气。",
+    },
+    RULE_TARGET_DETAIL_PAGE_LAYOUT: {
+        "label": "详情页布局规范",
+        "rule_type": RULE_TYPE_DERIVED,
+        "page_type": PAGE_TYPE_DETAIL_PAGE,
+        "source_kind": SOURCE_KIND_ASSET_BATCH,
+        "summary": "详情页素材沉淀模块布局、文字层级和图片区域规则。",
+    },
+}
+
+
+def normalize_rule_target(training_target: str | None) -> str:
+    if training_target in RULE_TARGET_META:
+        return str(training_target)
+    return RULE_TARGET_BRAND_CORE
+
+
+def get_rule_target_meta(training_target: str | None) -> dict[str, str]:
+    return RULE_TARGET_META[normalize_rule_target(training_target)]
+
+
+def get_default_rule_target(rule: BrandRule | None) -> str:
+    if rule is None:
+        return RULE_TARGET_BRAND_CORE
+    rule_type = rule.rule_type or RULE_TYPE_CORE
+    page_type = rule.page_type or PAGE_TYPE_BRAND_IDENTITY
+    if rule_type == RULE_TYPE_DERIVED and page_type == PAGE_TYPE_DETAIL_PAGE:
+        return RULE_TARGET_DETAIL_PAGE_LAYOUT
+    return RULE_TARGET_BRAND_CORE
+
+
+def _target_filter_clauses(training_target: str) -> list[Any]:
+    normalized = normalize_rule_target(training_target)
+    meta = RULE_TARGET_META[normalized]
+    if normalized == RULE_TARGET_BRAND_CORE:
+        return [
+            or_(BrandRule.rule_type == meta["rule_type"], BrandRule.rule_type.is_(None)),
+            or_(BrandRule.page_type == meta["page_type"], BrandRule.page_type.is_(None)),
+        ]
+    return [
+        BrandRule.rule_type == meta["rule_type"],
+        BrandRule.page_type == meta["page_type"],
+    ]
 
 
 class Product(Base):
@@ -155,7 +220,7 @@ class Product(Base):
 class WorkflowRun(Base):
     __tablename__ = "workflow_runs"
 
-    run_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(100, collation="utf8mb4_unicode_ci"), primary_key=True)
     status: Mapped[str] = mapped_column(String(64), index=True)
     current_stage: Mapped[str | None] = mapped_column(String(100), nullable=True)
     current_stage_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -181,7 +246,11 @@ class WorkflowAsset(Base):
     __tablename__ = "workflow_assets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(100, collation="utf8mb4_unicode_ci"),
+        ForeignKey("workflow_runs.run_id"),
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     size: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -196,7 +265,11 @@ class WorkflowStage(Base):
     __table_args__ = (UniqueConstraint("run_id", "stage_id", name="uq_workflow_stage_run_stage"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(100, collation="utf8mb4_unicode_ci"),
+        ForeignKey("workflow_runs.run_id"),
+        index=True,
+    )
     stage_id: Mapped[str] = mapped_column(String(100), index=True)
     title: Mapped[str] = mapped_column(String(255))
     icon: Mapped[str] = mapped_column(String(64), default="sparkles")
@@ -214,7 +287,11 @@ class WorkflowLog(Base):
     __tablename__ = "workflow_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(100, collation="utf8mb4_unicode_ci"),
+        ForeignKey("workflow_runs.run_id"),
+        index=True,
+    )
     scope: Mapped[str] = mapped_column(String(100))
     title: Mapped[str] = mapped_column(Text)
     message: Mapped[str] = mapped_column(Text)
@@ -226,7 +303,11 @@ class WorkflowArtifact(Base):
     __tablename__ = "workflow_artifacts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(100, collation="utf8mb4_unicode_ci"),
+        ForeignKey("workflow_runs.run_id"),
+        index=True,
+    )
     output_dir: Mapped[str] = mapped_column(String(1024))
     preview_svg: Mapped[str] = mapped_column(String(1024))
     design_spec_path: Mapped[str] = mapped_column(String(1024))
@@ -241,7 +322,11 @@ class DesignFeedback(Base):
     __tablename__ = "design_feedback"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        String(100, collation="utf8mb4_unicode_ci"),
+        ForeignKey("workflow_runs.run_id"),
+        index=True,
+    )
     feedback_type: Mapped[str] = mapped_column(String(64), default="designer_edit")
     author: Mapped[str] = mapped_column(String(100), default="designer")
     changes: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
@@ -295,6 +380,14 @@ def _ensure_schema_upgrades() -> None:
         statements.append("ALTER TABLE brand_rules ADD COLUMN website_urls JSON NULL")
     if "base_version" not in existing:
         statements.append("ALTER TABLE brand_rules ADD COLUMN base_version VARCHAR(64) NULL")
+    if "rule_type" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN rule_type VARCHAR(64) NULL")
+    if "page_type" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN page_type VARCHAR(64) NULL")
+    if "source_kind" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN source_kind VARCHAR(64) NULL")
+    if "parent_rule_id" not in existing:
+        statements.append("ALTER TABLE brand_rules ADD COLUMN parent_rule_id INTEGER NULL")
     if not statements:
         return
     with engine.begin() as connection:
@@ -890,6 +983,123 @@ def get_brand_rules_data() -> dict[str, Any] | None:
     return get_brand_rules_page_data()
 
 
+def _serialize_rule_version(
+    rule: BrandRule,
+    parent_versions: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    target_key = get_default_rule_target(rule)
+    meta = get_rule_target_meta(target_key)
+    return {
+        "id": rule.id,
+        "version": rule.version,
+        "status": rule.status,
+        "createdAt": rule.created_at.isoformat() if rule.created_at else None,
+        "baseVersion": rule.base_version or "",
+        "ruleCount": rule.rule_count,
+        "layoutCount": rule.layout_count,
+        "promptCount": rule.prompt_count,
+        "ruleType": rule.rule_type or meta["rule_type"],
+        "pageType": rule.page_type or meta["page_type"],
+        "sourceKind": rule.source_kind or meta["source_kind"],
+        "parentRuleId": rule.parent_rule_id,
+        "parentVersion": (parent_versions or {}).get(rule.parent_rule_id or -1, ""),
+        "targetKey": target_key,
+        "targetLabel": meta["label"],
+    }
+
+
+def _serialize_workflow_rule(rule: BrandRule, brand: Brand, parent_versions: dict[int, str] | None = None) -> dict[str, Any]:
+    target_key = get_default_rule_target(rule)
+    target_meta = get_rule_target_meta(target_key)
+    markdown = rule.markdown or _default_rule_markdown(
+        brand.name,
+        rule.version,
+        rule.design_rules or [],
+        rule.layout_rules or [],
+        rule.prompt_templates or [],
+        rule.website_urls or [],
+        target_label=target_meta["label"],
+        target_key=target_key,
+    )
+    return {
+        "id": rule.id,
+        "brandId": brand.id,
+        "brandName": brand.name,
+        "version": rule.version,
+        "status": rule.status,
+        "targetKey": target_key,
+        "targetLabel": target_meta["label"],
+        "ruleType": rule.rule_type or target_meta["rule_type"],
+        "pageType": rule.page_type or target_meta["page_type"],
+        "sourceKind": rule.source_kind or target_meta["source_kind"],
+        "parentRuleId": rule.parent_rule_id,
+        "parentVersion": (parent_versions or {}).get(rule.parent_rule_id or -1, ""),
+        "designRules": rule.design_rules or [],
+        "layoutRules": rule.layout_rules or [],
+        "components": rule.components or [],
+        "promptTemplates": rule.prompt_templates or [],
+        "websiteUrls": rule.website_urls or [],
+        "trainingPrompt": rule.training_prompt or "",
+        "markdown": markdown,
+    }
+
+
+def get_workflow_rule_context(
+    core_rule_id: int | None = None,
+    detail_page_rule_id: int | None = None,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+
+        def load_rule(rule_id: int, expected_target: str) -> tuple[BrandRule, Brand]:
+            row = session.execute(
+                select(BrandRule, Brand)
+                .join(Brand, BrandRule.brand_id == Brand.id)
+                .where(BrandRule.id == rule_id)
+                .limit(1)
+            ).first()
+            if row is None:
+                raise ValueError("brand rule not found")
+            rule, brand = row
+            actual_target = get_default_rule_target(rule)
+            if actual_target != expected_target:
+                raise ValueError("brand rule target does not match workflow selection")
+            return rule, brand
+
+        core_payload: dict[str, Any] | None = None
+        detail_payload: dict[str, Any] | None = None
+        selected_brand_id: int | None = None
+        selected_brand_name = ""
+
+        if core_rule_id:
+            core_rule, core_brand = load_rule(core_rule_id, RULE_TARGET_BRAND_CORE)
+            parent_versions = {core_rule.id: core_rule.version}
+            core_payload = _serialize_workflow_rule(core_rule, core_brand, parent_versions)
+            selected_brand_id = core_brand.id
+            selected_brand_name = core_brand.name
+
+        if detail_page_rule_id:
+            detail_rule, detail_brand = load_rule(detail_page_rule_id, RULE_TARGET_DETAIL_PAGE_LAYOUT)
+            parent_versions = {detail_rule.id: detail_rule.version}
+            if detail_rule.parent_rule_id:
+                parent = session.get(BrandRule, detail_rule.parent_rule_id)
+                if parent is not None:
+                    parent_versions[parent.id] = parent.version
+            detail_payload = _serialize_workflow_rule(detail_rule, detail_brand, parent_versions)
+            if selected_brand_id is not None and detail_brand.id != selected_brand_id:
+                raise ValueError("selected core rule and detail page rule belong to different brands")
+            selected_brand_id = detail_brand.id
+            selected_brand_name = detail_brand.name
+
+        return {
+            "brandId": selected_brand_id,
+            "brandName": selected_brand_name,
+            "coreRule": core_payload,
+            "detailPageRule": detail_payload,
+        }
+
+
 def get_brand_rules_page_data(
     brand_id: int | None = None,
     version_id: int | None = None,
@@ -902,37 +1112,19 @@ def get_brand_rules_page_data(
         if not brands:
             return None
         selected_brand = next((brand for brand in brands if brand.id == brand_id), brands[0])
-        if version_id:
-            rule = session.execute(
-                select(BrandRule).where(
-                    BrandRule.brand_id == selected_brand.id,
-                    BrandRule.id == version_id,
-                )
-            ).scalar_one_or_none()
-        else:
-            rule = session.execute(
+        brand_rule_rows = list(
+            session.execute(
                 select(BrandRule)
                 .where(BrandRule.brand_id == selected_brand.id)
                 .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-        versions = [
-            {
-                "id": item.id,
-                "version": item.version,
-                "status": item.status,
-                "createdAt": item.created_at.isoformat() if item.created_at else None,
-                "baseVersion": item.base_version or "",
-                "ruleCount": item.rule_count,
-                "layoutCount": item.layout_count,
-                "promptCount": item.prompt_count,
-            }
-            for item in session.execute(
-                select(BrandRule)
-                .where(BrandRule.brand_id == selected_brand.id)
-                .order_by(BrandRule.created_at.desc(), BrandRule.id.desc())
             ).scalars()
-        ]
+        )
+        parent_versions = {item.id: item.version for item in brand_rule_rows}
+        if version_id:
+            rule = next((item for item in brand_rule_rows if item.id == version_id), None)
+        else:
+            rule = brand_rule_rows[0] if brand_rule_rows else None
+        versions = [_serialize_rule_version(item, parent_versions) for item in brand_rule_rows]
         assets = [
             {
                 "id": asset.id,
@@ -954,6 +1146,26 @@ def get_brand_rules_page_data(
                 .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
                 .limit(1)
             ).scalar_one_or_none()
+            active_core = session.execute(
+                select(BrandRule)
+                .where(
+                    BrandRule.brand_id == brand.id,
+                    BrandRule.status == "active",
+                    *_target_filter_clauses(RULE_TARGET_BRAND_CORE),
+                )
+                .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            active_detail = session.execute(
+                select(BrandRule)
+                .where(
+                    BrandRule.brand_id == brand.id,
+                    BrandRule.status == "active",
+                    *_target_filter_clauses(RULE_TARGET_DETAIL_PAGE_LAYOUT),
+                )
+                .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
             brand_rows.append(
                 {
                     "id": brand.id,
@@ -961,8 +1173,38 @@ def get_brand_rules_page_data(
                     "status": brand.status,
                     "version": latest_rule.version if latest_rule else "未训练",
                     "ruleCount": latest_rule.rule_count if latest_rule else 0,
+                    "coreVersion": active_core.version if active_core else "",
+                    "detailPageVersion": active_detail.version if active_detail else "",
+                    "totalVersions": session.execute(
+                        select(func.count(BrandRule.id)).where(BrandRule.brand_id == brand.id)
+                    ).scalar_one(),
                 }
             )
+        active_versions: dict[str, dict[str, Any] | None] = {}
+        for target_key in RULE_TARGET_META:
+            active_rule = session.execute(
+                select(BrandRule)
+                .where(
+                    BrandRule.brand_id == selected_brand.id,
+                    BrandRule.status == "active",
+                    *_target_filter_clauses(target_key),
+                )
+                .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            active_versions[target_key] = (
+                _serialize_rule_version(active_rule, parent_versions) if active_rule else None
+            )
+        target_summaries = [
+            {
+                "targetKey": target_key,
+                "label": meta["label"],
+                "summary": meta["summary"],
+                "count": len([item for item in versions if item["targetKey"] == target_key]),
+                "activeVersion": (active_versions[target_key] or {}).get("version", ""),
+            }
+            for target_key, meta in RULE_TARGET_META.items()
+        ]
         if rule is None:
             return {
                 "page": page,
@@ -970,6 +1212,7 @@ def get_brand_rules_page_data(
                 "selectedBrand": {"id": selected_brand.id, "name": selected_brand.name},
                 "overview": [
                     {"label": "规则版本", "value": "未训练", "description": "当前生效版本"},
+                    {"label": "规则类型", "value": "未选择", "description": "请先训练品牌级或详情页规则"},
                     {"label": "设计规则说明", "value": 0, "description": "条结构化规则"},
                     {"label": "布局规则摘要", "value": 0, "description": "模块模板"},
                     {"label": "Prompt 模板摘要", "value": 0, "description": "场景模板"},
@@ -981,12 +1224,17 @@ def get_brand_rules_page_data(
                 "versions": versions,
                 "selectedVersionId": version_id,
                 "markdown": "",
-                "trainingPrompt": DEFAULT_BRAND_RULE_PROMPT,
+                "trainingPrompt": default_training_prompt(RULE_TARGET_BRAND_CORE),
                 "sourceAssets": assets,
                 "websiteUrls": [],
+                "selectedTargetKey": RULE_TARGET_BRAND_CORE,
+                "activeVersions": active_versions,
+                "targetSummaries": target_summaries,
                 "emptyState": f"{selected_brand.name} 还没有品牌规则，请先上传品牌资产并发起训练。",
             }
         version_id = rule.id
+        target_key = get_default_rule_target(rule)
+        target_meta = get_rule_target_meta(target_key)
         markdown = rule.markdown or _default_rule_markdown(
             selected_brand.name,
             rule.version,
@@ -994,13 +1242,16 @@ def get_brand_rules_page_data(
             rule.layout_rules or [],
             rule.prompt_templates or [],
             rule.website_urls or [],
+            target_label=target_meta["label"],
+            target_key=target_key,
         )
         return {
             "page": page,
             "brands": brand_rows,
             "selectedBrand": {"id": selected_brand.id, "name": selected_brand.name},
             "overview": [
-                {"label": "规则版本", "value": rule.version, "description": "当前生效版本"},
+                {"label": "规则版本", "value": rule.version, "description": "当前查看版本"},
+                {"label": "规则类型", "value": target_meta["label"], "description": "规则层级与页面类型"},
                 {"label": "设计规则说明", "value": rule.rule_count, "description": "条结构化规则"},
                 {"label": "布局规则摘要", "value": rule.layout_count, "description": "模块模板"},
                 {"label": "Prompt 模板摘要", "value": rule.prompt_count, "description": "场景模板"},
@@ -1012,9 +1263,12 @@ def get_brand_rules_page_data(
             "versions": versions,
             "selectedVersionId": version_id,
             "markdown": markdown,
-            "trainingPrompt": rule.training_prompt or DEFAULT_BRAND_RULE_PROMPT,
+            "trainingPrompt": rule.training_prompt or default_training_prompt(target_key),
             "sourceAssets": assets,
             "websiteUrls": rule.website_urls or [],
+            "selectedTargetKey": target_key,
+            "activeVersions": active_versions,
+            "targetSummaries": target_summaries,
             "emptyState": "",
         }
 
@@ -1073,7 +1327,9 @@ def _build_trained_rule_content(
     prompt: str,
     website_urls: list[str],
     base_rule: BrandRule | None,
+    training_target: str,
 ) -> dict[str, Any]:
+    target_key = normalize_rule_target(training_target)
     asset_names = [asset.name for asset in assets]
     folder_names = sorted({asset.folder for asset in assets})
     focuses = _prompt_focuses(prompt)
@@ -1084,24 +1340,104 @@ def _build_trained_rule_content(
     source_text = "、".join(asset_names) or "未选择素材"
     folder_text = "、".join(folder_names) or ("官网 URL" if website_count else "空白输入")
 
-    new_design_rules = [
-        {
-            "title": "训练输入策略",
-            "description": f"{base_text}，基于 {len(assets)} 个素材和 {website_count} 个官网 URL 生成 {version}。",
-        },
-        {
-            "title": "素材采样范围",
-            "description": f"本次选择素材：{source_text}。覆盖类型：{folder_text}。",
-        },
-        {
-            "title": "提示词聚焦方向",
-            "description": f"提示词要求优先沉淀 {focus_text}；原始提示词：{_clip(prompt, 220)}",
-        },
-        {
-            "title": "素材使用约束",
-            "description": "生成设计任务时优先复用已选素材体现出的视觉语言；未覆盖内容需要标注为待人工确认。",
-        },
-    ]
+    if target_key == RULE_TARGET_BRAND_CORE:
+        new_design_rules = [
+            {
+                "title": "品牌训练输入策略",
+                "description": f"{base_text}，基于 {len(assets)} 个素材和 {website_count} 个官网 URL 生成 {version}。",
+            },
+            {
+                "title": "品牌视觉要素",
+                "description": f"从 {source_text or '官网输入'} 中提炼品牌色彩、字体、图形语言与调性表达。",
+            },
+            {
+                "title": "品牌语气与禁用项",
+                "description": f"提示词重点沉淀 {focus_text}；输出须明确品牌口吻、风险项和不应出现的视觉偏差。",
+            },
+            {
+                "title": "核心规则稳定性",
+                "description": "Core Rule 作为品牌级约束，只允许补充说明，不直接被单次页面素材覆盖。",
+            },
+        ]
+        new_layout_rules = [
+            {
+                "title": "官网视觉结构",
+                "description": f"根据 {folder_text} 总结官网首屏、栏目节奏和品牌信息组织方式，但不固化为具体详情页模板。",
+            },
+            {
+                "title": "品牌留白与栅格",
+                "description": "沉淀品牌常用的留白密度、卡片间距、图文平衡和版心宽度偏好，供后续页面规则继承。",
+            },
+        ]
+        new_components = [
+            {
+                "title": f"{brand_name} 品牌识别组件",
+                "description": "包含品牌标题、辅助文案、色块、图形符号和 Logo 组合方式。",
+            },
+            {
+                "title": "品牌语气检查项",
+                "description": f"生成前确认文案与视觉是否覆盖 {focus_text}。",
+            },
+        ]
+    else:
+        new_design_rules = [
+            {
+                "title": "详情页训练输入策略",
+                "description": f"{base_text}，基于 {len(assets)} 个详情页素材沉淀商品详情页 Derived Rule。",
+            },
+            {
+                "title": "文字层级规范",
+                "description": "明确标题、副标题、正文、参数说明与 CTA 的字号层级、对齐方式和段落节奏。",
+            },
+            {
+                "title": "图文协同约束",
+                "description": f"优先从 {folder_text} 提取图片主次关系、卖点呈现顺序与图文占比。",
+            },
+            {
+                "title": "页面转化检查项",
+                "description": "详情页规则需兼顾视觉统一与转化表达，避免模块顺序混乱或信息密度失衡。",
+            },
+        ]
+        new_layout_rules = [
+            {
+                "title": "页面模块顺序",
+                "description": "先首屏主视觉，再卖点展开、参数说明、场景证明与结尾转化模块，形成稳定的信息流。",
+            },
+            {
+                "title": "主图区域",
+                "description": "主图区域应占据首屏核心视觉面积，文字与主体图保持清晰主次，避免遮挡关键商品信息。",
+            },
+            {
+                "title": "卖点图区域",
+                "description": "卖点图与说明文案成组出现，建议按 2-4 个分区排列，保持统一边距、图比和留白。",
+            },
+            {
+                "title": "参数与对比区域",
+                "description": "参数图、对比图和表格信息应集中在中后段模块，采用稳定栅格和重复模板减少阅读负担。",
+            },
+            {
+                "title": "图片放置规则",
+                "description": f"根据 {source_text or '详情页素材'} 确定横图、竖图、局部特写和场景图的推荐位置与裁切比例。",
+            },
+        ]
+        if "详情页转化" in focuses:
+            new_layout_rules.append(
+                {"title": "转化模块", "description": "在首屏、功能说明和结尾区域保留明确 CTA 与购买理由。"}
+            )
+        new_components = [
+            {
+                "title": f"{brand_name} Hero 组件",
+                "description": "适用于商品详情页首屏，包含主标题、副标题、卖点摘要与主视觉图片区域。",
+            },
+            {
+                "title": "卖点卡片组件",
+                "description": "用于功能点、参数点或场景点的重复模块，保持标题长度、图标样式和边距一致。",
+            },
+            {
+                "title": "图文区块模板",
+                "description": "规定左图右文、上文下图或双列对比等常用详情页图文版式。",
+            },
+        ]
     if any(focus == "禁用规则" for focus in focuses):
         new_design_rules.append(
             {
@@ -1109,32 +1445,6 @@ def _build_trained_rule_content(
                 "description": "提示词包含禁用/避免类要求，输出前必须检查颜色、组件、文案是否触碰负向约束。",
             }
         )
-
-    new_layout_rules = [
-        {
-            "title": "训练版页面结构",
-            "description": f"围绕 {focus_text} 组织详情页模块，首屏先表达品牌识别，再进入卖点和参数。",
-        },
-        {
-            "title": "素材驱动布局",
-            "description": f"来自 {folder_text} 的素材优先决定图片比例、留白密度和模块节奏。",
-        },
-    ]
-    if "详情页转化" in focuses:
-        new_layout_rules.append(
-            {"title": "转化模块", "description": "在首屏、功能说明和结尾区域保留明确 CTA 与购买理由。"}
-        )
-
-    new_components = [
-        {
-            "title": f"{brand_name} {version} 素材卡片",
-            "description": f"用于展示本次勾选素材形成的视觉、字体、色彩和构图规则。",
-        },
-        {
-            "title": "训练提示词检查项",
-            "description": f"每次生成前检查是否覆盖：{focus_text}。",
-        },
-    ]
 
     return {
         "design_rules": _merge_rule_lists(base_rule.design_rules if base_rule else None, new_design_rules),
@@ -1144,20 +1454,44 @@ def _build_trained_rule_content(
     }
 
 
+def _latest_rule_for_target(
+    session: Session,
+    brand_id: int,
+    training_target: str,
+    status: str | None = None,
+) -> BrandRule | None:
+    stmt = select(BrandRule).where(
+        BrandRule.brand_id == brand_id,
+        *_target_filter_clauses(training_target),
+    )
+    if status:
+        stmt = stmt.where(BrandRule.status == status)
+    return session.execute(
+        stmt.order_by(BrandRule.updated_at.desc(), BrandRule.id.desc()).limit(1)
+    ).scalar_one_or_none()
+
+
 def get_brand_rule_training_context(
     brand_id: int,
     asset_ids: list[int],
     base_version_id: int | None = None,
+    training_target: str | None = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
         if session is None:
             raise ValueError("database disabled")
+        target_key = normalize_rule_target(training_target)
         brand = session.get(Brand, brand_id)
         if brand is None:
             raise ValueError("brand not found")
         base_rule = session.get(BrandRule, base_version_id) if base_version_id else None
         if base_rule is not None and base_rule.brand_id != brand_id:
             raise ValueError("base version does not belong to brand")
+        if base_rule is not None and get_default_rule_target(base_rule) != target_key:
+            raise ValueError("base version type does not match training target")
+        linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE, status="active")
+        if linked_core_rule is None:
+            linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE)
         assets = list(
             session.execute(
                 select(BrandAsset).where(
@@ -1168,6 +1502,8 @@ def get_brand_rule_training_context(
         )
         return {
             "brand": {"id": brand.id, "name": brand.name, "status": brand.status},
+            "trainingTarget": target_key,
+            "targetMeta": get_rule_target_meta(target_key),
             "baseRule": {
                 "id": base_rule.id,
                 "version": base_rule.version,
@@ -1175,8 +1511,16 @@ def get_brand_rule_training_context(
                 "designRules": base_rule.design_rules or [],
                 "layoutRules": base_rule.layout_rules or [],
                 "components": base_rule.components or [],
+                "targetKey": get_default_rule_target(base_rule),
             }
             if base_rule
+            else None,
+            "linkedCoreRule": {
+                "id": linked_core_rule.id,
+                "version": linked_core_rule.version,
+                "markdown": linked_core_rule.markdown or "",
+            }
+            if linked_core_rule
             else None,
             "assets": [
                 {
@@ -1229,18 +1573,26 @@ def train_brand_rule_version(
     website_urls: list[str],
     base_version_id: int | None = None,
     model_result: dict[str, Any] | None = None,
+    training_target: str | None = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
         if session is None:
             raise ValueError("database disabled")
+        target_key = normalize_rule_target(training_target)
+        target_meta = get_rule_target_meta(target_key)
         brand = session.get(Brand, brand_id)
         if brand is None:
             raise ValueError("brand not found")
         base_rule = session.get(BrandRule, base_version_id) if base_version_id else None
         if base_rule is not None and base_rule.brand_id != brand_id:
             raise ValueError("base version does not belong to brand")
+        if base_rule is not None and get_default_rule_target(base_rule) != target_key:
+            raise ValueError("base version type does not match training target")
         version_count = session.execute(
-            select(func.count(BrandRule.id)).where(BrandRule.brand_id == brand_id)
+            select(func.count(BrandRule.id)).where(
+                BrandRule.brand_id == brand_id,
+                *_target_filter_clauses(target_key),
+            )
         ).scalar_one()
         version = f"V1.{version_count + 4}"
         assets = list(
@@ -1258,30 +1610,56 @@ def train_brand_rule_version(
             prompt=prompt,
             website_urls=website_urls,
             base_rule=base_rule,
+            training_target=target_key,
         )
         if model_result:
             generated = _normalize_model_rule_content(model_result, generated)
         design_rules = generated["design_rules"]
         layout_rules = generated["layout_rules"]
         components = generated["components"]
-        prompt_templates = [
-            {
-                "title": "详情页生成模板",
-                "description": f"必须结合 {len(assets)} 个勾选素材、训练提示词和官网信息生成详情页。",
-            },
-            {
-                "title": "官网规则提取模板",
-                "description": f"从 {len([url for url in website_urls if url])} 个官网 URL 中提取视觉调性、内容结构与品牌语气。",
-            },
-            {
-                "title": "叠加训练模板",
-                "description": (
-                    f"基于 {base_rule.version} 保留历史规则并追加本次素材结论。"
-                    if base_rule
-                    else "不叠加历史版本，直接根据本次素材和提示词创建全新规则。"
-                ),
-            },
-        ]
+        if target_key == RULE_TARGET_BRAND_CORE:
+            prompt_templates = [
+                {
+                    "title": "品牌核心规则提取模板",
+                    "description": f"从 {len([url for url in website_urls if url])} 个官网 URL 与 {len(assets)} 个素材中提取品牌视觉规范与语气。",
+                },
+                {
+                    "title": "品牌审核模板",
+                    "description": "输出颜色、字体、图形语言与禁用项，供设计师审核后发布为 Core Rule。",
+                },
+                {
+                    "title": "叠加训练模板",
+                    "description": (
+                        f"基于 {base_rule.version} 保留历史品牌规则并追加本次官网素材结论。"
+                        if base_rule
+                        else "不叠加历史版本，直接根据本次官网素材和提示词创建全新品牌核心规则。"
+                    ),
+                },
+            ]
+            parent_rule_id = None
+        else:
+            prompt_templates = [
+                {
+                    "title": "详情页布局提取模板",
+                    "description": f"基于 {len(assets)} 个详情页素材提取模块顺序、图文排版和图片区域规则。",
+                },
+                {
+                    "title": "详情页生成模板",
+                    "description": "后续详情页生成必须同时消费品牌 Core Rule 与当前商品详情页 Derived Rule。",
+                },
+                {
+                    "title": "叠加训练模板",
+                    "description": (
+                        f"基于 {base_rule.version} 保留历史详情页规则并追加本次素材结论。"
+                        if base_rule
+                        else "不叠加历史版本，直接根据本次详情页素材和提示词创建全新页面规则。"
+                    ),
+                },
+            ]
+            linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE, status="active")
+            if linked_core_rule is None:
+                linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE)
+            parent_rule_id = linked_core_rule.id if linked_core_rule else None
         markdown = _default_rule_markdown(
             brand.name,
             version,
@@ -1292,32 +1670,11 @@ def train_brand_rule_version(
             training_prompt=prompt,
             source_assets=generated["source_assets"],
             base_version=base_rule.version if base_rule else None,
+            target_label=target_meta["label"],
+            target_key=target_key,
         )
-        if base_rule and base_rule.markdown:
-            markdown = "\n\n".join(
-                [
-                    base_rule.markdown,
-                    "---",
-                    f"## {version} 叠加训练补充",
-                    _default_rule_markdown(
-                        brand.name,
-                        version,
-                        design_rules,
-                        layout_rules,
-                        prompt_templates,
-                        website_urls,
-                        training_prompt=prompt,
-                        source_assets=generated["source_assets"],
-                        base_version=base_rule.version,
-                    ),
-                ]
-            )
         if generated.get("markdown"):
             markdown = str(generated["markdown"])
-            if base_rule and base_rule.markdown:
-                markdown = "\n\n".join(
-                    [base_rule.markdown, "---", f"## {version} 多模态训练补充", markdown]
-                )
         row = BrandRule(
             brand_id=brand_id,
             version=version,
@@ -1334,10 +1691,19 @@ def train_brand_rule_version(
             source_asset_ids=asset_ids,
             website_urls=website_urls,
             base_version=base_rule.version if base_rule else None,
+            rule_type=target_meta["rule_type"],
+            page_type=target_meta["page_type"],
+            source_kind=target_meta["source_kind"],
+            parent_rule_id=parent_rule_id,
         )
         session.add(row)
         session.flush()
-        return {"id": row.id, "version": row.version, "markdown": row.markdown}
+        return {
+            "id": row.id,
+            "version": row.version,
+            "markdown": row.markdown,
+            "targetKey": target_key,
+        }
 
 
 def update_brand_rule_markdown(rule_id: int, markdown: str) -> dict[str, Any]:
@@ -1360,11 +1726,13 @@ def publish_brand_rule_version(rule_id: int) -> dict[str, Any]:
         rule = session.get(BrandRule, rule_id)
         if rule is None:
             raise ValueError("brand rule not found")
+        target_key = get_default_rule_target(rule)
         active_rules = session.execute(
             select(BrandRule).where(
                 BrandRule.brand_id == rule.brand_id,
                 BrandRule.status == "active",
                 BrandRule.id != rule.id,
+                *_target_filter_clauses(target_key),
             )
         ).scalars()
         for item in active_rules:
@@ -1383,11 +1751,13 @@ def rollback_brand_rule_version(rule_id: int) -> dict[str, Any]:
         target = session.get(BrandRule, rule_id)
         if target is None:
             raise ValueError("brand rule not found")
+        target_key = get_default_rule_target(target)
         active_rules = session.execute(
             select(BrandRule).where(
                 BrandRule.brand_id == target.brand_id,
                 BrandRule.status == "active",
                 BrandRule.id != target.id,
+                *_target_filter_clauses(target_key),
             )
         ).scalars()
         for item in active_rules:
@@ -1409,6 +1779,8 @@ def diff_brand_rule_versions(base_rule_id: int, compare_rule_id: int) -> dict[st
             raise ValueError("brand rule not found")
         if base.brand_id != compare.brand_id:
             raise ValueError("versions do not belong to the same brand")
+        if get_default_rule_target(base) != get_default_rule_target(compare):
+            raise ValueError("versions do not belong to the same rule target")
 
         def keyed(items: list[dict[str, Any]] | None) -> dict[str, str]:
             result: dict[str, str] = {}
@@ -1441,8 +1813,18 @@ def diff_brand_rule_versions(base_rule_id: int, compare_rule_id: int) -> dict[st
                 "changed": changed,
             }
         return {
-            "base": {"id": base.id, "version": base.version, "status": base.status},
-            "compare": {"id": compare.id, "version": compare.version, "status": compare.status},
+            "base": {
+                "id": base.id,
+                "version": base.version,
+                "status": base.status,
+                "targetKey": get_default_rule_target(base),
+            },
+            "compare": {
+                "id": compare.id,
+                "version": compare.version,
+                "status": compare.status,
+                "targetKey": get_default_rule_target(compare),
+            },
             "diff": diff,
         }
 
@@ -1514,6 +1896,12 @@ def delete_brand_rule_version(rule_id: int) -> dict[str, Any]:
         rule = session.get(BrandRule, rule_id)
         if rule is None:
             raise ValueError("brand rule not found")
+        child_rules = session.execute(
+            select(BrandRule).where(BrandRule.parent_rule_id == rule.id)
+        ).scalars()
+        for item in child_rules:
+            item.parent_rule_id = None
+            item.updated_at = datetime.utcnow()
         result = {"id": rule.id, "brandId": rule.brand_id, "version": rule.version}
         session.delete(rule)
         return result
@@ -1529,7 +1917,11 @@ def get_brand_rule_options_data() -> dict[str, Any] | None:
             .order_by(Brand.name.asc(), BrandRule.updated_at.desc(), BrandRule.id.desc())
         ).all()
         rules = []
+        core_rules = []
+        detail_page_rules = []
         for rule, brand in rows:
+            target_key = get_default_rule_target(rule)
+            target_meta = get_rule_target_meta(target_key)
             markdown = rule.markdown or _default_rule_markdown(
                 brand.name,
                 rule.version,
@@ -1537,21 +1929,35 @@ def get_brand_rule_options_data() -> dict[str, Any] | None:
                 rule.layout_rules or [],
                 rule.prompt_templates or [],
                 rule.website_urls or [],
+                target_label=target_meta["label"],
+                target_key=target_key,
             )
-            rules.append(
-                {
-                    "id": rule.id,
-                    "brandId": brand.id,
-                    "brandName": brand.name,
-                    "version": rule.version,
-                    "status": rule.status,
-                    "ruleCount": rule.rule_count,
-                    "markdown": markdown,
-                    "updatedAt": rule.updated_at.isoformat() if rule.updated_at else None,
-                    "label": f"{brand.name} / {rule.version} / {rule.status}",
-                }
-            )
-        return {"rules": rules}
+            item = {
+                "id": rule.id,
+                "brandId": brand.id,
+                "brandName": brand.name,
+                "version": rule.version,
+                "status": rule.status,
+                "ruleCount": rule.rule_count,
+                "markdown": markdown,
+                "updatedAt": rule.updated_at.isoformat() if rule.updated_at else None,
+                "targetKey": target_key,
+                "targetLabel": target_meta["label"],
+                "ruleType": rule.rule_type or target_meta["rule_type"],
+                "pageType": rule.page_type or target_meta["page_type"],
+                "sourceKind": rule.source_kind or target_meta["source_kind"],
+                "label": f"{brand.name} / {target_meta['label']} / {rule.version} / {rule.status}",
+            }
+            rules.append(item)
+            if target_key == RULE_TARGET_BRAND_CORE:
+                core_rules.append(item)
+            elif target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT:
+                detail_page_rules.append(item)
+        return {
+            "rules": rules,
+            "coreRules": core_rules,
+            "detailPageRules": detail_page_rules,
+        }
 
 
 def get_products_data() -> dict[str, Any] | None:
@@ -1686,11 +2092,25 @@ DEFAULT_WORKFLOW_STAGES: list[dict[str, Any]] = [
     {"id": "output_review", "title": "输出、审核与反馈", "icon": "check-circle"},
 ]
 
-DEFAULT_BRAND_RULE_PROMPT = (
-    "你是 BrandOS 的品牌规则训练 Agent。请基于勾选的品牌数字资产、历史规则版本和官网内容，"
-    "提取品牌视觉规范、布局结构、组件模式、文案语气和详情页生成约束。输出 Markdown，"
-    "要求可读、可审阅、可被设计师手动修改。"
-)
+DEFAULT_BRAND_RULE_PROMPTS: dict[str, str] = {
+    RULE_TARGET_BRAND_CORE: (
+        "你是 BrandOS 的品牌设计规范训练 Agent。请基于官网素材、品牌资产和历史品牌规则版本，"
+        "提取品牌视觉规范、字体色彩、品牌语气、禁用项与稳定的品牌级布局倾向。输出 Markdown，"
+        "要求可读、可审阅、可被设计师手动修改。"
+    ),
+    RULE_TARGET_DETAIL_PAGE_LAYOUT: (
+        "你是 BrandOS 的详情页布局规则训练 Agent。请基于商品详情页素材、历史详情页规则和关联品牌规范，"
+        "提取页面模块顺序、文字排版层级、图片放置区域、比例、留白与图文协同约束。输出 Markdown，"
+        "要求可直接用于后续商品详情页生成。"
+    ),
+}
+
+
+DEFAULT_BRAND_RULE_PROMPT = DEFAULT_BRAND_RULE_PROMPTS[RULE_TARGET_BRAND_CORE]
+
+
+def default_training_prompt(training_target: str | None) -> str:
+    return DEFAULT_BRAND_RULE_PROMPTS[normalize_rule_target(training_target)]
 
 
 def _default_rule_markdown(
@@ -1703,11 +2123,16 @@ def _default_rule_markdown(
     training_prompt: str | None = None,
     source_assets: list[dict[str, str]] | None = None,
     base_version: str | None = None,
+    target_label: str | None = None,
+    target_key: str | None = None,
 ) -> str:
+    title_label = target_label or "品牌规则"
     lines = [
-        f"# {brand_name} 品牌规则 {version}",
+        f"# {brand_name} {title_label} {version}",
         "",
         "## 训练输入",
+        f"- 规则目标：{title_label}",
+        f"- 目标编码：{normalize_rule_target(target_key)}",
         f"- 叠加版本：{base_version or '不叠加，创建全新规则'}",
     ]
     if training_prompt:
@@ -1716,10 +2141,7 @@ def _default_rule_markdown(
         lines.extend(["", "## 所选素材摘要"])
         for item in source_assets:
             lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
-    lines.extend([
-        "",
-        "## 设计规则说明",
-    ])
+    lines.extend(["", "## 设计规则说明"])
     for item in design_rules:
         lines.append(f"- **{item.get('title', '')}**：{item.get('description', '')}")
     lines.extend(["", "## 布局规则摘要"])
@@ -1998,10 +2420,15 @@ def ensure_seed_data() -> None:
                         design_rules,
                         layout_rules,
                         prompt_templates,
+                        target_label=get_rule_target_meta(RULE_TARGET_BRAND_CORE)["label"],
+                        target_key=RULE_TARGET_BRAND_CORE,
                     ),
-                    training_prompt=DEFAULT_BRAND_RULE_PROMPT,
+                    training_prompt=default_training_prompt(RULE_TARGET_BRAND_CORE),
                     source_asset_ids=[],
                     website_urls=[],
+                    rule_type=RULE_TYPE_CORE,
+                    page_type=PAGE_TYPE_BRAND_IDENTITY,
+                    source_kind=SOURCE_KIND_WEBSITE,
                 )
             )
 

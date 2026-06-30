@@ -21,7 +21,8 @@ from .llm import LLMClient, LLMUnavailable, resolve_api_key, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
 from .render import build_design_spec, write_artifacts
-from .runtime import append_log, get_run_snapshot, reset_run, set_run_state
+from .runtime import append_log, get_run_snapshot, reset_run, sanitize_for_log, set_run_state
+from .wireframe import parse_wireframe_spec, wireframe_summary_text
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = APP_ROOT / "runs"
@@ -417,6 +418,21 @@ def _brand_rule_model_result(
             "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
             "components": [{"title": "组件标题", "description": "组件说明"}],
             "source_assets": [{"title": "素材名称", "description": "从该素材提取出的规范"}],
+            "visual_tokens": {
+                "colors": [],
+                "typography": {},
+                "spacing": {},
+                "tone": "",
+            },
+            "layout_schema": {
+                "schema_version": "brandos_layout_schema.v1",
+                "canvas": {"width": 790, "height_mode": "auto"},
+                "sections": [],
+                "image_slots": [],
+                "text_layers": [],
+                "component_templates": [],
+            },
+            "image_slots": [],
         },
     }
     append_log(run_id, "BrandRuleTrain", "训练输入上下文", model_payload)
@@ -434,7 +450,11 @@ def _brand_rule_model_result(
             "2. 若 base_rule 不为空，叠加历史详情页规则并说明新增模块；若为空，创建全新详情页规则。\n"
             "3. markdown 要包含：训练输入、素材摘要、页面结构、文字排版层级、图片放置区域、留白与栅格、组件模板、禁用项。\n"
             "4. layout_rules 必须明确描述主图区、卖点图区、参数/对比区、CTA 区等位置或比例关系。\n"
-            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            "5. 必须额外输出可执行 layout_schema，包含 sections、image_slots、text_layers、component_templates；"
+            "每个 section 和 slot 尽量给出 x/y/w/h、component_type、background、fit/crop、asset_type。\n"
+            "6. 如果 selected_assets.metadata.wireframe_spec 存在，优先基于其中的 drawing object、cell box、merged range、media path 抽取 layout_schema。\n"
+            "7. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description；"
+            "layout_schema 和 image_slots 作为 JSON 字段单独输出。\n\n"
             f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
         )
     else:
@@ -449,7 +469,8 @@ def _brand_rule_model_result(
             "2. 若 base_rule 不为空，叠加历史品牌规则并说明新增规范；若为空，创建全新品牌核心规则。\n"
             "3. markdown 要包含：训练输入、素材摘要、品牌视觉规范、色彩/字体/语气、禁用项、供页面规则继承的品牌级布局倾向。\n"
             "4. 不要把具体商品详情页模块当成唯一模板写死在 Core Rule 中。\n"
-            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            "5. 必须额外输出 visual_tokens，包含 colors、typography、spacing、tone、do/dont 等可执行视觉 Token。\n"
+            "6. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
             f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
         )
     try:
@@ -643,7 +664,8 @@ def _extract_spreadsheet_text(path: Path) -> str | None:
                     count += 1
                 if count >= 120:
                     break
-        return "\n".join(lines)[:16000]
+        wireframe = wireframe_summary_text(parse_wireframe_spec(path))
+        return "\n".join([*lines, wireframe]).strip()[:24000]
     except Exception:
         return None
 
@@ -660,6 +682,15 @@ def _save_assets(
         target = input_dir / filename
         with target.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        wireframe_spec = parse_wireframe_spec(target)
+        metadata: dict[str, object] = {}
+        if wireframe_spec:
+            metadata["wireframe_spec"] = wireframe_spec
+            metadata["wireframe_summary"] = {
+                "sheet_count": len(wireframe_spec.get("sheets") or []),
+                "media_count": wireframe_spec.get("media_count", 0),
+                "drawing_object_count": wireframe_spec.get("drawing_object_count", 0),
+            }
         assets.append(
             UploadedAsset(
                 name=filename,
@@ -667,6 +698,7 @@ def _save_assets(
                 size=target.stat().st_size,
                 saved_path=str(target),
                 extracted_text=_extract_spreadsheet_text(target),
+                metadata=metadata,
                 bucket=bucket_override or classify_asset(filename, file.content_type),
             )
         )
@@ -856,6 +888,7 @@ def generate_workflow(
         selected_rule_context = database.get_workflow_rule_context(
             core_rule_id=request.selected_core_rule_id,
             detail_page_rule_id=request.selected_detail_page_rule_id,
+            brand_name=request.brand_name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -961,15 +994,15 @@ def generate_workflow(
         status=status,
         summary=summary,
         used_deepagents=used_model,
-        stages=stages,
+        stages=sanitize_for_log(stages),
         agent_report=agent_report,
-        design_spec=spec,
+        design_spec=sanitize_for_log(spec),
         artifacts=WorkflowArtifacts(
             run_id=run_id,
             output_dir=str(output_dir),
             **artifact_paths,
         ),
-        assets=assets,
+        assets=sanitize_for_log(assets),
         warnings=ctx.warnings,
     )
 

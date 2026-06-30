@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -457,15 +458,22 @@ def session_scope():
 
 
 def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
     if hasattr(value, "model_dump"):
-        return _jsonable(value.model_dump(mode="json"))
-    if isinstance(value, dict):
+        try:
+            return _jsonable(value.model_dump(mode="json"))
+        except Exception:
+            return _jsonable(value.model_dump())
+    if isinstance(value, Mapping):
         return {key: _jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, list | tuple | set):
         return [_jsonable(item) for item in value]
-    if isinstance(value, tuple):
-        return [_jsonable(item) for item in value]
-    return value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
 
 
 def persist_run_started(run_id: str, request: Any, assets: list[Any]) -> None:
@@ -1144,6 +1152,7 @@ def create_brand_assets(
                 metadata_json={
                     "original_name": file_item.get("name"),
                     "bucket": file_item.get("bucket"),
+                    **(file_item.get("metadata") or {}),
                 },
             )
             session.add(row)
@@ -1300,6 +1309,7 @@ def _serialize_workflow_rule(rule: BrandRule, brand: Brand, parent_versions: dic
 def get_workflow_rule_context(
     core_rule_id: int | None = None,
     detail_page_rule_id: int | None = None,
+    brand_name: str | None = None,
 ) -> dict[str, Any]:
     with session_scope() as session:
         if session is None:
@@ -1324,6 +1334,48 @@ def get_workflow_rule_context(
         detail_payload: dict[str, Any] | None = None
         selected_brand_id: int | None = None
         selected_brand_name = ""
+
+        def default_brand_id() -> int | None:
+            name = (brand_name or "").strip()
+            if name:
+                brand = session.execute(
+                    select(Brand).where(Brand.name == name).limit(1)
+                ).scalar_one_or_none()
+                if brand is not None:
+                    return brand.id
+            active_core = session.execute(
+                select(BrandRule)
+                .where(BrandRule.status == "active", *_target_filter_clauses(RULE_TARGET_BRAND_CORE))
+                .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            return active_core.brand_id if active_core is not None else None
+
+        if not core_rule_id and not detail_page_rule_id:
+            brand_id = default_brand_id()
+            if brand_id:
+                core_default = session.execute(
+                    select(BrandRule)
+                    .where(
+                        BrandRule.brand_id == brand_id,
+                        BrandRule.status == "active",
+                        *_target_filter_clauses(RULE_TARGET_BRAND_CORE),
+                    )
+                    .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                detail_default = session.execute(
+                    select(BrandRule)
+                    .where(
+                        BrandRule.brand_id == brand_id,
+                        BrandRule.status == "active",
+                        *_target_filter_clauses(RULE_TARGET_DETAIL_PAGE_LAYOUT),
+                    )
+                    .order_by(BrandRule.updated_at.desc(), BrandRule.id.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                core_rule_id = core_default.id if core_default else None
+                detail_page_rule_id = detail_default.id if detail_default else None
 
         if core_rule_id:
             core_rule, core_brand = load_rule(core_rule_id, RULE_TARGET_BRAND_CORE)
@@ -1561,6 +1613,268 @@ def _asset_rule_summary(asset: BrandAsset) -> dict[str, str]:
     return {"title": asset.name, "description": description}
 
 
+def _asset_training_weight(asset: BrandAsset) -> float:
+    role = (asset.training_role or "").lower()
+    quality = (asset.quality_level or "").lower()
+    weight = 1.0
+    if asset.include_in_training:
+        weight += 0.5
+    if role in {"core", "golden", "canonical", "high_quality"}:
+        weight += 0.8
+    if role in {"exclude", "negative"}:
+        weight -= 0.8
+    if quality in {"golden", "excellent", "high"}:
+        weight += 0.7
+    if quality in {"low", "poor"}:
+        weight -= 0.5
+    return max(0.1, round(weight, 2))
+
+
+def _asset_wireframe_specs(assets: list[BrandAsset]) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for asset in assets:
+        metadata = asset.metadata_json or {}
+        spec = metadata.get("wireframe_spec") if isinstance(metadata, dict) else None
+        if isinstance(spec, dict):
+            specs.append({"asset_id": asset.id, "asset_name": asset.name, "spec": spec})
+    return specs
+
+
+def _infer_slot_role(text: str, media_path: str = "") -> str:
+    normalized = f"{text} {media_path}".lower()
+    checks = [
+        ("hero", ("hero", "主图", "头图", "视频", "banner", "9:16")),
+        ("product_gallery", ("图集", "packshot", "产品", "product")),
+        ("lifestyle", ("lifestyle", "场景", "搭配", "model", "routine", "day")),
+        ("recommendation", ("推荐", "new arrivals", "member section", "koi")),
+        ("brand_story", ("brand story", "品牌故事", "品牌")),
+        ("size", ("尺码", "size", "参数", "规格")),
+        ("interaction", ("互动", "cta", "购买")),
+    ]
+    for role, keywords in checks:
+        if any(keyword in normalized for keyword in keywords):
+            return role
+    return "detail"
+
+
+def _build_layout_schema_from_assets(
+    assets: list[BrandAsset],
+    target_key: str,
+) -> dict[str, Any]:
+    wireframes = _asset_wireframe_specs(assets)
+    source_assets = [
+        {
+            "id": asset.id,
+            "name": asset.name,
+            "folder": asset.folder,
+            "content_type": asset.content_type or "",
+            "training_role": asset.training_role,
+            "quality_level": asset.quality_level,
+            "weight": _asset_training_weight(asset),
+        }
+        for asset in assets
+    ]
+    schema: dict[str, Any] = {
+        "schema_version": "brandos_layout_schema.v1",
+        "page_type": "detail_page" if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else "brand_core_reference",
+        "source_assets": source_assets,
+        "canvas": {"width": 790, "height_mode": "auto", "unit": "px"},
+        "sections": [],
+        "image_slots": [],
+        "text_layers": [],
+        "component_templates": [],
+    }
+
+    section_index = 1
+    for wireframe in wireframes[:4]:
+        spec = wireframe["spec"]
+        for sheet in (spec.get("sheets") or [])[:3]:
+            objects = sheet.get("objects") or []
+            cells = sheet.get("cells") or []
+            image_objects = [obj for obj in objects if obj.get("type") == "image"]
+            text_objects = [obj for obj in objects if obj.get("text")]
+            if not image_objects and not cells:
+                continue
+            dims = sheet.get("dimensions") or {}
+            section_id = f"wf_{section_index:02d}_{str(sheet.get('name') or 'sheet').lower()}"
+            section = {
+                "id": section_id,
+                "name": str(sheet.get("name") or f"线框页 {section_index}"),
+                "component_type": "wireframe_sheet",
+                "source_asset": wireframe["asset_name"],
+                "x": 0,
+                "y": 0,
+                "w": int(dims.get("width_px") or 790),
+                "h": int(dims.get("height_px") or 900),
+                "background": {"type": "solid", "color": "#ffffff"},
+                "z_index": section_index,
+            }
+            schema["sections"].append(section)
+            for image_index, obj in enumerate(image_objects[:36], start=1):
+                box = obj.get("box") or {}
+                slot_role = _infer_slot_role(str(obj.get("name") or ""), str(obj.get("media_path") or ""))
+                schema["image_slots"].append(
+                    {
+                        "id": f"{section_id}_img_{image_index:02d}",
+                        "section_id": section_id,
+                        "role": slot_role,
+                        "asset_type": slot_role,
+                        "x": int(box.get("x") or 0),
+                        "y": int(box.get("y") or 0),
+                        "w": int(box.get("w") or 1),
+                        "h": int(box.get("h") or 1),
+                        "fit": "cover",
+                        "crop": "center",
+                        "source_media_path": obj.get("media_path") or "",
+                        "cell_anchor": obj.get("cell_anchor") or {},
+                    }
+                )
+            for text_index, item in enumerate([*text_objects, *cells][:80], start=1):
+                box = item.get("box") or {}
+                text = str(item.get("text") or "")
+                schema["text_layers"].append(
+                    {
+                        "id": f"{section_id}_txt_{text_index:02d}",
+                        "section_id": section_id,
+                        "role": _infer_slot_role(text),
+                        "text": text[:300],
+                        "x": int(box.get("x") or 0),
+                        "y": int(box.get("y") or 0),
+                        "w": int(box.get("w") or 160),
+                        "h": int(box.get("h") or 28),
+                        "font": (item.get("style") or {}).get("font") if isinstance(item.get("style"), dict) else "",
+                        "font_size": (item.get("style") or {}).get("font_size") if isinstance(item.get("style"), dict) else None,
+                    }
+                )
+            section_index += 1
+
+    if not schema["sections"]:
+        template = [
+            ("hero", "首屏主视觉", 960),
+            ("product_gallery", "产品图集", 820),
+            ("lifestyle", "场景展示", 860),
+            ("detail", "细节卖点", 760),
+            ("size", "尺码参数", 640),
+            ("recommendation", "人气推荐", 760),
+            ("brand_story", "品牌故事", 720),
+        ]
+        y = 0
+        for index, (role, name, height) in enumerate(template, start=1):
+            section_id = f"section_{index:02d}_{role}"
+            schema["sections"].append(
+                {
+                    "id": section_id,
+                    "name": name,
+                    "component_type": role,
+                    "x": 0,
+                    "y": y,
+                    "w": 790,
+                    "h": height,
+                    "background": {"type": "solid", "color": "#ffffff" if index % 2 else "#f7f7f4"},
+                    "z_index": index,
+                }
+            )
+            schema["image_slots"].append(
+                {
+                    "id": f"{section_id}_image",
+                    "section_id": section_id,
+                    "role": role,
+                    "asset_type": role,
+                    "x": 40,
+                    "y": 120,
+                    "w": 710,
+                    "h": max(260, height - 200),
+                    "fit": "cover",
+                    "crop": "center",
+                }
+            )
+            y += height
+
+    schema["component_templates"] = [
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "component_type": item["component_type"],
+            "image_slot_count": len([slot for slot in schema["image_slots"] if slot.get("section_id") == item["id"]]),
+            "text_layer_count": len([layer for layer in schema["text_layers"] if layer.get("section_id") == item["id"]]),
+        }
+        for item in schema["sections"]
+    ]
+    return schema
+
+
+def _build_visual_tokens(brand_name: str, assets: list[BrandAsset]) -> dict[str, Any]:
+    return {
+        "brand_name": brand_name,
+        "asset_weights": [
+            {
+                "asset_id": asset.id,
+                "asset_name": asset.name,
+                "training_role": asset.training_role,
+                "quality_level": asset.quality_level,
+                "weight": _asset_training_weight(asset),
+            }
+            for asset in assets
+        ],
+        "color_policy": "优先从高权重品牌资产与历史详情页中提取主色、背景色和辅助色；不得由单次商品素材覆盖 Core Rule。",
+        "typography_policy": "字体、字号、字重和中英文字体关系进入 Core Rule；生成任务只允许在规则范围内选择。",
+    }
+
+
+def _score_rule_quality(
+    target_key: str,
+    design_rules: list[dict[str, Any]],
+    layout_rules: list[dict[str, Any]],
+    components: list[dict[str, Any]],
+) -> dict[str, Any]:
+    layout_schema = next(
+        (item.get("schema") for item in layout_rules if item.get("title") == "__layout_schema__"),
+        None,
+    )
+    image_slots = next(
+        (item.get("slots") for item in components if item.get("title") == "__image_slots__"),
+        None,
+    )
+    visual_tokens = next(
+        (item.get("tokens") for item in design_rules if item.get("title") == "__visual_tokens__"),
+        None,
+    )
+    checks = {
+        "has_visual_tokens": isinstance(visual_tokens, dict),
+        "has_layout_schema": isinstance(layout_schema, dict),
+        "has_sections": isinstance(layout_schema, dict) and bool(layout_schema.get("sections")),
+        "has_image_slots": isinstance(image_slots, list) and bool(image_slots),
+        "has_components": bool([item for item in components if not str(item.get("title") or "").startswith("__")]),
+        "has_human_readable_rules": bool(
+            [item for item in [*design_rules, *layout_rules] if not str(item.get("title") or "").startswith("__")]
+        ),
+    }
+    weights = {
+        "has_visual_tokens": 18 if target_key == RULE_TARGET_BRAND_CORE else 8,
+        "has_layout_schema": 20 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
+        "has_sections": 18 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
+        "has_image_slots": 18 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
+        "has_components": 12,
+        "has_human_readable_rules": 14,
+    }
+    score = sum(weight for key, weight in weights.items() if checks.get(key))
+    max_score = sum(weights.values())
+    overall = round(score / max_score * 100, 1)
+    blockers = []
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and not checks["has_layout_schema"]:
+        blockers.append("缺少可执行 layout_schema，生成阶段会退回通用模板")
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and not checks["has_image_slots"]:
+        blockers.append("缺少 image_slots，素材无法精准匹配图片槽")
+    if target_key == RULE_TARGET_BRAND_CORE and not checks["has_visual_tokens"]:
+        blockers.append("缺少 visual_tokens，品牌规范仍主要依赖文本提示词")
+    return {
+        "overall": overall,
+        "checks": checks,
+        "blocking_issues": blockers,
+        "publish_recommendation": "ready" if overall >= 75 and not blockers else "needs_review",
+    }
+
+
 def _merge_rule_lists(
     base_items: list[dict[str, Any]] | None,
     new_items: list[dict[str, Any]],
@@ -1572,7 +1886,10 @@ def _merge_rule_lists(
         if title in seen:
             continue
         seen.add(title)
-        merged.append({"title": title, "description": str(item.get("description") or "")})
+        normalized = dict(item)
+        normalized["title"] = title
+        normalized["description"] = str(item.get("description") or "")
+        merged.append(normalized)
     return merged
 
 
@@ -1597,6 +1914,7 @@ def _build_trained_rule_content(
     folder_text = "、".join(folder_names) or ("官网 URL" if website_count else "空白输入")
 
     if target_key == RULE_TARGET_BRAND_CORE:
+        visual_tokens = _build_visual_tokens(brand_name, assets)
         new_design_rules = [
             {
                 "title": "品牌训练输入策略",
@@ -1613,6 +1931,11 @@ def _build_trained_rule_content(
             {
                 "title": "核心规则稳定性",
                 "description": "Core Rule 作为品牌级约束，只允许补充说明，不直接被单次页面素材覆盖。",
+            },
+            {
+                "title": "__visual_tokens__",
+                "description": "可执行品牌视觉 Token，供生成阶段直接消费。",
+                "tokens": visual_tokens,
             },
         ]
         new_layout_rules = [
@@ -1636,6 +1959,7 @@ def _build_trained_rule_content(
             },
         ]
     else:
+        layout_schema = _build_layout_schema_from_assets(assets, target_key)
         new_design_rules = [
             {
                 "title": "详情页训练输入策略",
@@ -1675,6 +1999,11 @@ def _build_trained_rule_content(
                 "title": "图片放置规则",
                 "description": f"根据 {source_text or '详情页素材'} 确定横图、竖图、局部特写和场景图的推荐位置与裁切比例。",
             },
+            {
+                "title": "__layout_schema__",
+                "description": "可执行详情页 Layout JSON Schema，包含 section、坐标、图片槽和文本层。",
+                "schema": layout_schema,
+            },
         ]
         if "详情页转化" in focuses:
             new_layout_rules.append(
@@ -1692,6 +2021,11 @@ def _build_trained_rule_content(
             {
                 "title": "图文区块模板",
                 "description": "规定左图右文、上文下图或双列对比等常用详情页图文版式。",
+            },
+            {
+                "title": "__image_slots__",
+                "description": "可执行图片槽定义，供素材匹配与裁切使用。",
+                "slots": layout_schema.get("image_slots", []),
             },
         ]
     if any(focus == "禁用规则" for focus in focuses):
@@ -1853,7 +2187,10 @@ def _normalize_rule_items(value: Any, fallback: list[dict[str, Any]]) -> list[di
         title = str(item.get("title") or "").strip()
         description = str(item.get("description") or "").strip()
         if title or description:
-            items.append({"title": title or "未命名规则", "description": description})
+            normalized = dict(item)
+            normalized["title"] = title or "未命名规则"
+            normalized["description"] = description
+            items.append(normalized)
     return items or fallback
 
 
@@ -1861,10 +2198,44 @@ def _normalize_model_rule_content(
     model_result: dict[str, Any],
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
+    design_rules = _normalize_rule_items(model_result.get("design_rules"), fallback["design_rules"])
+    layout_rules = _normalize_rule_items(model_result.get("layout_rules"), fallback["layout_rules"])
+    components = _normalize_rule_items(model_result.get("components"), fallback["components"])
+
+    visual_tokens = model_result.get("visual_tokens")
+    if isinstance(visual_tokens, dict):
+        design_rules.append(
+            {
+                "title": "__visual_tokens__",
+                "description": "可执行品牌视觉 Token，供生成阶段直接消费。",
+                "tokens": visual_tokens,
+            }
+        )
+
+    layout_schema = model_result.get("layout_schema")
+    if isinstance(layout_schema, dict):
+        layout_rules.append(
+            {
+                "title": "__layout_schema__",
+                "description": "可执行详情页 Layout JSON Schema，包含 section、坐标、图片槽和文本层。",
+                "schema": layout_schema,
+            }
+        )
+
+    image_slots = model_result.get("image_slots")
+    if isinstance(image_slots, list):
+        components.append(
+            {
+                "title": "__image_slots__",
+                "description": "可执行图片槽定义，供素材匹配与裁切使用。",
+                "slots": image_slots,
+            }
+        )
+
     return {
-        "design_rules": _normalize_rule_items(model_result.get("design_rules"), fallback["design_rules"]),
-        "layout_rules": _normalize_rule_items(model_result.get("layout_rules"), fallback["layout_rules"]),
-        "components": _normalize_rule_items(model_result.get("components"), fallback["components"]),
+        "design_rules": design_rules,
+        "layout_rules": layout_rules,
+        "components": components,
         "source_assets": _normalize_rule_items(model_result.get("source_assets"), fallback["source_assets"]),
         "markdown": str(model_result.get("markdown") or "").strip(),
     }
@@ -1921,6 +2292,14 @@ def train_brand_rule_version(
         design_rules = generated["design_rules"]
         layout_rules = generated["layout_rules"]
         components = generated["components"]
+        rule_quality = _score_rule_quality(target_key, design_rules, layout_rules, components)
+        design_rules.append(
+            {
+                "title": "__rule_quality__",
+                "description": "规则训练质量评分，用于判断是否适合发布和进入生成任务。",
+                "score": rule_quality,
+            }
+        )
         if target_key == RULE_TARGET_BRAND_CORE:
             prompt_templates = [
                 {

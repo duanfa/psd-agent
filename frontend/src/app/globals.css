@@ -853,6 +853,16 @@ button {
   font-weight: 900;
 }
 
+.rule-table .rule-description-cell {
+  min-width: 420px;
+  white-space: normal;
+}
+
+.rule-table .rule-action-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+
 .toolbar-row {
   display: grid;
   grid-template-columns: 180px 180px minmax(0, 1fr);

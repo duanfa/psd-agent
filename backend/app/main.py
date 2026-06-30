@@ -426,6 +426,15 @@ def update_brand_rule_markdown(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.delete("/api/brand-rules/{rule_id}")
+def delete_brand_rule_version(rule_id: int) -> dict[str, object]:
+    try:
+        return database.delete_brand_rule_version(rule_id=rule_id)
+    except ValueError as exc:
+        status_code = 404 if "not found" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
 @app.get("/api/pages/products")
 def products_page() -> dict[str, object]:
     data = database.get_products_data()

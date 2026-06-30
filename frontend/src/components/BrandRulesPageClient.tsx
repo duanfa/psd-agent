@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import {
+  deleteBrandRuleVersion,
   fetchBrandRuleTrainLogs,
   fetchBrandRulesPageWithFilters,
   trainBrandRules,
@@ -16,6 +17,11 @@ function createClientRunId() {
   return `brand-rule-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function formatTime(value?: string | null) {
+  if (!value) return "未记录";
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
 export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesPageResponse }) {
   const [data, setData] = useState(initialData);
   const [loading, setLoading] = useState(false);
@@ -26,6 +32,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
   const [trainingStatus, setTrainingStatus] = useState("idle");
   const [trainingStage, setTrainingStage] = useState<string | null>(null);
   const [savingMarkdown, setSavingMarkdown] = useState(false);
+  const [deletingVersionId, setDeletingVersionId] = useState<number | null>(null);
   const [markdown, setMarkdown] = useState(initialData.markdown);
   const [trainForm, setTrainForm] = useState({
     assetIds: initialData.sourceAssets.map((item) => item.id),
@@ -142,6 +149,20 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
     }
   };
 
+  const handleDeleteVersion = async (ruleId: number, version: string) => {
+    if (!window.confirm(`确认删除规则版本“${version}”吗？`)) return;
+    setDeletingVersionId(ruleId);
+    setError(null);
+    try {
+      await deleteBrandRuleVersion(ruleId);
+      await loadData(data.selectedBrand.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingVersionId(null);
+    }
+  };
+
   return (
     <div className="data-page">
       <div className="topbar">
@@ -220,6 +241,71 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
             </section>
           ) : (
             <>
+              <section className="panel content-panel">
+                <div className="split-line">
+                  <div>
+                    <h2 className="section-title">规则版本列表</h2>
+                    <div className="subtitle">列出当前品牌的所有规则版本，可切换查看，也可直接删除某个版本。</div>
+                  </div>
+                  <span className="tag">当前品牌：{data.selectedBrand.name}</span>
+                </div>
+                <div className="table-wrap">
+                  <table className="simple-table rule-table">
+                    <thead>
+                      <tr>
+                        <th>版本</th>
+                        <th>状态</th>
+                        <th>叠加版本</th>
+                        <th>设计规则</th>
+                        <th>布局规则</th>
+                        <th>Prompt</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.versions.length ? (
+                        data.versions.map((version) => (
+                          <tr key={version.id}>
+                            <td>{version.version}</td>
+                            <td>{version.status}</td>
+                            <td>{version.baseVersion || "无"}</td>
+                            <td>{version.ruleCount}</td>
+                            <td>{version.layoutCount}</td>
+                            <td>{version.promptCount}</td>
+                            <td>{formatTime(version.createdAt)}</td>
+                            <td className="rule-action-cell">
+                              <button
+                                className="btn ghost"
+                                disabled={loading || deletingVersionId === version.id}
+                                type="button"
+                                onClick={() => loadData(data.selectedBrand.id, version.id)}
+                              >
+                                查看
+                              </button>
+                              <button
+                                className="btn danger"
+                                disabled={loading || deletingVersionId === version.id}
+                                type="button"
+                                onClick={() => handleDeleteVersion(version.id, version.version)}
+                              >
+                                {deletingVersionId === version.id ? "删除中..." : "删除版本"}
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td className="table-empty" colSpan={8}>
+                            当前品牌还没有规则版本。
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
               <section className="panel content-panel">
                 <div className="split-line">
                   <h2 className="section-title">规则 Markdown</h2>

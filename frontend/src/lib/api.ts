@@ -245,6 +245,9 @@ export interface BrandRulesPageResponse {
     status: string;
     createdAt?: string | null;
     baseVersion: string;
+    ruleCount: number;
+    layoutCount: number;
+    promptCount: number;
   }>;
   selectedVersionId?: number | null;
   markdown: string;
@@ -285,7 +288,8 @@ export interface ProductsPageResponse {
     designDirection: string;
     sellingPoints: string[];
     materials: string[];
-  };
+  } | null;
+  emptyState: string;
 }
 
 export interface DesignTasksPageResponse {
@@ -456,6 +460,17 @@ export async function updateBrandRuleMarkdown(
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `保存 Markdown 失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function deleteBrandRuleVersion(
+  ruleId: number,
+): Promise<{ id: number; brandId: number | null; version: string }> {
+  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}`, { method: "DELETE" });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `删除规则版本失败：${response.status}`);
   }
   return response.json();
 }

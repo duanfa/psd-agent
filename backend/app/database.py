@@ -887,6 +887,9 @@ def get_brand_rules_page_data(
                 "status": item.status,
                 "createdAt": item.created_at.isoformat() if item.created_at else None,
                 "baseVersion": item.base_version or "",
+                "ruleCount": item.rule_count,
+                "layoutCount": item.layout_count,
+                "promptCount": item.prompt_count,
             }
             for item in session.execute(
                 select(BrandRule)
@@ -1314,6 +1317,18 @@ def update_brand_rule_markdown(rule_id: int, markdown: str) -> dict[str, Any]:
         return {"id": rule.id, "version": rule.version, "markdown": rule.markdown}
 
 
+def delete_brand_rule_version(rule_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        rule = session.get(BrandRule, rule_id)
+        if rule is None:
+            raise ValueError("brand rule not found")
+        result = {"id": rule.id, "brandId": rule.brand_id, "version": rule.version}
+        session.delete(rule)
+        return result
+
+
 def get_brand_rule_options_data() -> dict[str, Any] | None:
     with session_scope() as session:
         if session is None:
@@ -1356,7 +1371,12 @@ def get_products_data() -> dict[str, Any] | None:
         page = _setting(session, "products_page", {})
         products = list(session.execute(select(Product).order_by(Product.updated_at.desc())).scalars())
         if not products:
-            return None
+            return {
+                "page": page,
+                "products": [],
+                "selectedProduct": None,
+                "emptyState": "当前还没有商品数据，请先创建商品或导入商品资料。",
+            }
         selected = products[0]
         return {
             "page": page,
@@ -1381,6 +1401,7 @@ def get_products_data() -> dict[str, Any] | None:
                 "sellingPoints": selected.selling_points or [],
                 "materials": selected.materials or [],
             },
+            "emptyState": "",
         }
 
 

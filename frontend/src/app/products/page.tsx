@@ -37,15 +37,23 @@ export default async function ProductsPage() {
                 </tr>
               </thead>
               <tbody>
-                {data.products.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.name}</td>
-                    <td>{item.category}</td>
-                    <td>{item.sellingPointCount}</td>
-                    <td>{item.assetCount}</td>
-                    <td>{formatTime(item.updatedAt)}</td>
+                {data.products.length ? (
+                  data.products.map((item) => (
+                    <tr key={item.id}>
+                      <td>{item.name}</td>
+                      <td>{item.category}</td>
+                      <td>{item.sellingPointCount}</td>
+                      <td>{item.assetCount}</td>
+                      <td>{formatTime(item.updatedAt)}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td className="table-empty" colSpan={5}>
+                      {data.emptyState}
+                    </td>
                   </tr>
-                ))}
+                )}
               </tbody>
             </table>
           </div>
@@ -53,49 +61,69 @@ export default async function ProductsPage() {
 
         <aside className="panel content-panel">
           <h2 className="section-title">商品信息</h2>
-          <div className="field">
-            <span className="field-label">商品名称</span>
-            <input readOnly value={product.name} />
-          </div>
-          <div className="field">
-            <span className="field-label">商品分类</span>
-            <input readOnly value={product.category} />
-          </div>
-          <div className="field">
-            <span className="field-label">商品简介</span>
-            <textarea readOnly value={product.summary} />
-          </div>
+          {product ? (
+            <>
+              <div className="field">
+                <span className="field-label">商品名称</span>
+                <input readOnly value={product.name} />
+              </div>
+              <div className="field">
+                <span className="field-label">商品分类</span>
+                <input readOnly value={product.category} />
+              </div>
+              <div className="field">
+                <span className="field-label">商品简介</span>
+                <textarea readOnly value={product.summary} />
+              </div>
+            </>
+          ) : (
+            <div className="placeholder">
+              <p>{data.emptyState}</p>
+            </div>
+          )}
         </aside>
       </div>
 
       <div className="content-grid-2">
         <section className="panel content-panel">
           <h2 className="section-title">商品素材</h2>
-          <div className="action-grid action-grid-3">
-            {product.materials.map((item) => (
-              <article className="info-card" key={item}>
-                <div className="placeholder-box">{item}</div>
-              </article>
-            ))}
-          </div>
+          {product ? (
+            <div className="action-grid action-grid-3">
+              {product.materials.map((item) => (
+                <article className="info-card" key={item}>
+                  <div className="placeholder-box">{item}</div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="placeholder">
+              <p>暂无商品素材可展示。</p>
+            </div>
+          )}
         </section>
 
         <section className="panel content-panel">
           <h2 className="section-title">卖点与 Brief</h2>
-          <div className="record-list">
-            <div className="record-item">
-              <strong>核心卖点</strong>
-              <div className="subtitle">{product.sellingPoints.join(" / ")}</div>
+          {product ? (
+            <div className="record-list">
+              <div className="record-item">
+                <strong>核心卖点</strong>
+                <div className="subtitle">{product.sellingPoints.join(" / ")}</div>
+              </div>
+              <div className="record-item">
+                <strong>商品 Brief</strong>
+                <div className="subtitle">{product.brief}</div>
+              </div>
+              <div className="record-item">
+                <strong>设计方向</strong>
+                <div className="subtitle">{product.designDirection}</div>
+              </div>
             </div>
-            <div className="record-item">
-              <strong>商品 Brief</strong>
-              <div className="subtitle">{product.brief}</div>
+          ) : (
+            <div className="placeholder">
+              <p>暂无卖点和 Brief 信息。</p>
             </div>
-            <div className="record-item">
-              <strong>设计方向</strong>
-              <div className="subtitle">{product.designDirection}</div>
-            </div>
-          </div>
+          )}
         </section>
       </div>
     </div>

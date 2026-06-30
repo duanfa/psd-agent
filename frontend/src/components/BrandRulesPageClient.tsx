@@ -2,10 +2,14 @@
 
 import { useState } from "react";
 import {
+  fetchBrandRuleDiff,
   deleteBrandRuleVersion,
   fetchBrandRuleTrainLogs,
   fetchBrandRulesPageWithFilters,
+  publishBrandRule,
+  rollbackBrandRule,
   trainBrandRules,
+  type BrandRuleDiffResponse,
   type BrandRulesPageResponse,
   updateBrandRuleMarkdown,
 } from "@/lib/api";
@@ -32,6 +36,9 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
   const [trainingStatus, setTrainingStatus] = useState("idle");
   const [trainingStage, setTrainingStage] = useState<string | null>(null);
   const [savingMarkdown, setSavingMarkdown] = useState(false);
+  const [versionActionLoading, setVersionActionLoading] = useState(false);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [versionDiff, setVersionDiff] = useState<BrandRuleDiffResponse | null>(null);
   const [deletingVersionId, setDeletingVersionId] = useState<number | null>(null);
   const [markdown, setMarkdown] = useState(initialData.markdown);
   const [trainForm, setTrainForm] = useState({
@@ -160,6 +167,51 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeletingVersionId(null);
+    }
+  };
+
+  const selectedVersion = data.versions.find((version) => version.id === data.selectedVersionId);
+  const activeVersion = data.versions.find((version) => version.status === "active");
+
+  const handlePublish = async () => {
+    if (!data.selectedVersionId) return;
+    setVersionActionLoading(true);
+    setError(null);
+    try {
+      await publishBrandRule(data.selectedVersionId);
+      await loadData(data.selectedBrand.id, data.selectedVersionId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVersionActionLoading(false);
+    }
+  };
+
+  const handleRollback = async () => {
+    if (!data.selectedVersionId) return;
+    setVersionActionLoading(true);
+    setError(null);
+    try {
+      await rollbackBrandRule(data.selectedVersionId);
+      await loadData(data.selectedBrand.id, data.selectedVersionId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVersionActionLoading(false);
+    }
+  };
+
+  const handleLoadDiff = async () => {
+    if (!data.selectedVersionId || !activeVersion || data.selectedVersionId === activeVersion.id) return;
+    setDiffLoading(true);
+    setError(null);
+    try {
+      const diff = await fetchBrandRuleDiff(activeVersion.id, data.selectedVersionId);
+      setVersionDiff(diff);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDiffLoading(false);
     }
   };
 
@@ -308,16 +360,73 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
 
               <section className="panel content-panel">
                 <div className="split-line">
-                  <h2 className="section-title">规则 Markdown</h2>
-                  <button
-                    className="btn ghost"
-                    disabled={!data.selectedVersionId || savingMarkdown}
-                    type="button"
-                    onClick={handleSaveMarkdown}
-                  >
-                    {savingMarkdown ? "保存中..." : "保存修改"}
-                  </button>
+                  <div>
+                    <h2 className="section-title">规则 Markdown</h2>
+                    <div className="subtitle">
+                      当前状态：{selectedVersion?.status ?? "未选择"}
+                      {activeVersion ? ` / 生效版本：${activeVersion.version}` : ""}
+                    </div>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="btn ghost"
+                      disabled={!data.selectedVersionId || savingMarkdown}
+                      type="button"
+                      onClick={handleSaveMarkdown}
+                    >
+                      {savingMarkdown ? "保存中..." : "保存修改"}
+                    </button>
+                    <button
+                      className="btn ghost"
+                      disabled={!data.selectedVersionId || selectedVersion?.status === "active" || versionActionLoading}
+                      type="button"
+                      onClick={handleLoadDiff}
+                    >
+                      {diffLoading ? "对比中..." : "对比当前"}
+                    </button>
+                    <button
+                      className="btn ghost"
+                      disabled={!data.selectedVersionId || selectedVersion?.status === "active" || versionActionLoading}
+                      type="button"
+                      onClick={handlePublish}
+                    >
+                      发布为当前
+                    </button>
+                    <button
+                      className="btn ghost"
+                      disabled={!data.selectedVersionId || selectedVersion?.status === "active" || versionActionLoading}
+                      type="button"
+                      onClick={handleRollback}
+                    >
+                      回滚到此版
+                    </button>
+                  </div>
                 </div>
+                {versionDiff ? (
+                  <div className="diff-panel">
+                    <strong>
+                      版本差异：{versionDiff.base.version} → {versionDiff.compare.version}
+                    </strong>
+                    {Object.entries(versionDiff.diff).map(([section, diff]) => (
+                      <div className="diff-section" key={section}>
+                        <span className="tag">{section}</span>
+                        <div className="subtitle">
+                          新增 {diff.added.length} / 删除 {diff.removed.length} / 修改 {diff.changed.length}
+                        </div>
+                        {[...diff.added, ...diff.removed].slice(0, 4).map((item) => (
+                          <div className="diff-item" key={`${section}-${item.title}`}>
+                            {item.title}：{item.description}
+                          </div>
+                        ))}
+                        {diff.changed.slice(0, 3).map((item) => (
+                          <div className="diff-item" key={`${section}-${item.title}`}>
+                            {item.title}：{item.from} → {item.to}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <textarea
                   className="markdown-editor"
                   value={markdown}

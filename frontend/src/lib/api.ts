@@ -1,5 +1,10 @@
 export type WorkflowMode = "smart_recommend" | "strict_brand";
-export type OutputType = "detail_page" | "figma_page" | "psd_file" | "main_image" | "banner";
+export type OutputType =
+  | "detail_page"
+  | "figma_page"
+  | "psd_file"
+  | "main_image"
+  | "banner";
 
 export interface ModelConfig {
   provider: string;
@@ -92,7 +97,12 @@ export interface WorkflowPayload {
   prompts: AgentPrompts;
 }
 
-export type StageStatus = "completed" | "fallback" | "skipped" | "failed" | "running";
+export type StageStatus =
+  | "completed"
+  | "fallback"
+  | "skipped"
+  | "failed"
+  | "running";
 
 export interface StageResult {
   id: string;
@@ -126,6 +136,8 @@ export interface WorkflowResult {
     preview_svg: string;
     design_spec: string;
     photoshop_jsx: string;
+    figma_plugin: string;
+    editable_html: string;
     readme: string;
   };
   assets: Array<{
@@ -153,6 +165,16 @@ export interface WorkflowLogsResponse {
   current_stage?: string | null;
   logs: string[];
   stages: StageResult[];
+}
+
+export interface DesignFeedbackItem {
+  id: number;
+  runId: string;
+  feedbackType: string;
+  author: string;
+  changes: Array<Record<string, unknown>>;
+  notes: string;
+  createdAt?: string | null;
 }
 
 export const API_BASE =
@@ -198,7 +220,12 @@ export interface BrandAssetsPageResponse {
   filters: { brandId: number; folder: string; status: string; search: string };
   statuses: string[];
   selectedBrand: { id: number; name: string };
-  folders: Array<{ name: string; description: string; icon: string; count: number }>;
+  folders: Array<{
+    name: string;
+    description: string;
+    icon: string;
+    count: number;
+  }>;
   assets: Array<{
     id: number;
     name: string;
@@ -232,9 +259,19 @@ export interface BrandAssetPreviewResponse {
 
 export interface BrandRulesPageResponse {
   page: { title: string; subtitle: string };
-  brands: Array<{ id: number; name: string; status: string; version: string; ruleCount: number }>;
+  brands: Array<{
+    id: number;
+    name: string;
+    status: string;
+    version: string;
+    ruleCount: number;
+  }>;
   selectedBrand: { id: number; name: string };
-  overview: Array<{ label: string; value: string | number; description: string }>;
+  overview: Array<{
+    label: string;
+    value: string | number;
+    description: string;
+  }>;
   designRules: Array<{ title: string; description: string }>;
   layoutRules: Array<{ title: string; description: string }>;
   components: Array<{ title: string; description: string }>;
@@ -252,7 +289,12 @@ export interface BrandRulesPageResponse {
   selectedVersionId?: number | null;
   markdown: string;
   trainingPrompt: string;
-  sourceAssets: Array<{ id: number; name: string; folder: string; status: string }>;
+  sourceAssets: Array<{
+    id: number;
+    name: string;
+    folder: string;
+    status: string;
+  }>;
   websiteUrls: string[];
   emptyState: string;
 }
@@ -267,6 +309,19 @@ export interface BrandRuleOption {
   markdown: string;
   updatedAt?: string | null;
   label: string;
+}
+
+export interface BrandRuleDiffResponse {
+  base: { id: number; version: string; status: string };
+  compare: { id: number; version: string; status: string };
+  diff: Record<
+    string,
+    {
+      added: Array<{ title: string; description: string }>;
+      removed: Array<{ title: string; description: string }>;
+      changed: Array<{ title: string; from: string; to: string }>;
+    }
+  >;
 }
 
 export interface ProductsPageResponse {
@@ -318,7 +373,9 @@ export async function fetchModelTestConfig(): Promise<ModelTestConfigResponse> {
   return fetchJson("/api/model-test/config");
 }
 
-export async function testModel(input: { messages: ChatMessage[] }): Promise<ModelTestResponse> {
+export async function testModel(input: {
+  messages: ChatMessage[];
+}): Promise<ModelTestResponse> {
   const response = await fetch(`${API_BASE}/api/model-test`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -389,8 +446,12 @@ export async function updateBrand(input: {
   return response.json();
 }
 
-export async function deleteBrand(brandId: number): Promise<{ id: number; deletedAssets: number }> {
-  const response = await fetch(`${API_BASE}/api/brands/${brandId}`, { method: "DELETE" });
+export async function deleteBrand(
+  brandId: number,
+): Promise<{ id: number; deletedAssets: number }> {
+  const response = await fetch(`${API_BASE}/api/brands/${brandId}`, {
+    method: "DELETE",
+  });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `删除品牌失败：${response.status}`);
@@ -413,7 +474,9 @@ export async function fetchBrandRulesPageWithFilters(filters: {
   return fetchJson(`/api/pages/brand-rules${query ? `?${query}` : ""}`);
 }
 
-export async function fetchBrandRuleOptions(): Promise<{ rules: BrandRuleOption[] }> {
+export async function fetchBrandRuleOptions(): Promise<{
+  rules: BrandRuleOption[];
+}> {
   return fetchJson("/api/brand-rules/options");
 }
 
@@ -444,7 +507,9 @@ export async function trainBrandRules(input: {
   return response.json();
 }
 
-export async function fetchBrandRuleTrainLogs(runId: string): Promise<WorkflowLogsResponse> {
+export async function fetchBrandRuleTrainLogs(
+  runId: string,
+): Promise<WorkflowLogsResponse> {
   return fetchJson(`/api/brand-rules/train/${runId}/logs`);
 }
 
@@ -452,11 +517,14 @@ export async function updateBrandRuleMarkdown(
   ruleId: number,
   markdown: string,
 ): Promise<{ id: number; version: string; markdown: string }> {
-  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}/markdown`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ markdown }),
-  });
+  const response = await fetch(
+    `${API_BASE}/api/brand-rules/${ruleId}/markdown`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown }),
+    },
+  );
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `保存 Markdown 失败：${response.status}`);
@@ -464,10 +532,55 @@ export async function updateBrandRuleMarkdown(
   return response.json();
 }
 
+export async function publishBrandRule(
+  ruleId: number,
+): Promise<{ id: number; version: string; status: string }> {
+  const response = await fetch(
+    `${API_BASE}/api/brand-rules/${ruleId}/publish`,
+    {
+      method: "POST",
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `发布版本失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function rollbackBrandRule(
+  ruleId: number,
+): Promise<{ id: number; version: string; status: string }> {
+  const response = await fetch(
+    `${API_BASE}/api/brand-rules/${ruleId}/rollback`,
+    {
+      method: "POST",
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `回滚版本失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchBrandRuleDiff(
+  baseRuleId: number,
+  compareRuleId: number,
+): Promise<BrandRuleDiffResponse> {
+  const params = new URLSearchParams({
+    base_rule_id: String(baseRuleId),
+    compare_rule_id: String(compareRuleId),
+  });
+  return fetchJson(`/api/brand-rules/diff?${params.toString()}`);
+}
+
 export async function deleteBrandRuleVersion(
   ruleId: number,
 ): Promise<{ id: number; brandId: number | null; version: string }> {
-  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}`, { method: "DELETE" });
+  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}`, {
+    method: "DELETE",
+  });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `删除规则版本失败：${response.status}`);
@@ -522,12 +635,18 @@ export async function uploadBrandAssets(input: {
   return response.json();
 }
 
-export async function fetchBrandAssetPreview(assetId: number): Promise<BrandAssetPreviewResponse> {
+export async function fetchBrandAssetPreview(
+  assetId: number,
+): Promise<BrandAssetPreviewResponse> {
   return fetchJson(`/api/brand-assets/${assetId}/preview`);
 }
 
-export async function deleteBrandAsset(assetId: number): Promise<{ id: number; brandId: number }> {
-  const response = await fetch(`${API_BASE}/api/brand-assets/${assetId}`, { method: "DELETE" });
+export async function deleteBrandAsset(
+  assetId: number,
+): Promise<{ id: number; brandId: number }> {
+  const response = await fetch(`${API_BASE}/api/brand-assets/${assetId}`, {
+    method: "DELETE",
+  });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `删除资产失败：${response.status}`);
@@ -576,13 +695,50 @@ export async function cancelWorkflow(runId: string): Promise<void> {
   }
 }
 
-export async function fetchWorkflowLogs(runId: string): Promise<WorkflowLogsResponse> {
-  const response = await fetch(`${API_BASE}/api/workflows/${runId}/logs`, { cache: "no-store" });
+export async function fetchWorkflowLogs(
+  runId: string,
+): Promise<WorkflowLogsResponse> {
+  const response = await fetch(`${API_BASE}/api/workflows/${runId}/logs`, {
+    cache: "no-store",
+  });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `日志加载失败：${response.status}`);
   }
   return response.json();
+}
+
+export async function createWorkflowFeedback(input: {
+  runId: string;
+  feedbackType: string;
+  author: string;
+  changes: Array<Record<string, unknown>>;
+  notes: string;
+}): Promise<DesignFeedbackItem> {
+  const response = await fetch(
+    `${API_BASE}/api/workflows/${input.runId}/feedback`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        feedback_type: input.feedbackType,
+        author: input.author,
+        changes: input.changes,
+        notes: input.notes,
+      }),
+    },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `保存反馈失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchWorkflowFeedback(
+  runId: string,
+): Promise<{ items: DesignFeedbackItem[] }> {
+  return fetchJson(`/api/workflows/${runId}/feedback`);
 }
 
 export function artifactUrl(runId: string, name: string): string {

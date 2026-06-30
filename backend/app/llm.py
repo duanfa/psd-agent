@@ -157,9 +157,10 @@ class LLMClient:
     def invoke_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         guidance = (
             "\n\n请只输出一个合法 JSON 对象，不要包含解释文字、注释或 markdown 代码块标记。"
+            "必须使用双引号，数组和对象末尾不要有多余逗号。"
         )
         text = self.invoke_text(system_prompt + guidance, user_prompt)
-        return _parse_json_object(text)
+        return self._parse_or_repair_json(text, system_prompt, user_prompt)
 
     def invoke_vision_json(
         self,
@@ -193,19 +194,55 @@ class LLMClient:
             raise LLMUnavailable(f"多模态模型调用失败：{exc}") from exc
         result = self._stringify_response_content(response)
         append_log(self.run_id, "LLM", "多模态模型返回内容", result)
-        return _parse_json_object(result)
+        return self._parse_or_repair_json(result, system_prompt, user_prompt)
+
+    def _parse_or_repair_json(
+        self,
+        text: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> dict[str, Any]:
+        try:
+            return _parse_json_object(text)
+        except LLMUnavailable as first_error:
+            append_log(
+                self.run_id,
+                "LLM",
+                "JSON 解析失败，尝试本地清洗与模型修复",
+                {"error": str(first_error), "raw": text[:6000]},
+            )
+            cleaned = _cleanup_json_text(text)
+            if cleaned != text:
+                try:
+                    data = _parse_json_object(cleaned)
+                    append_log(self.run_id, "LLM", "JSON 本地清洗修复成功")
+                    return data
+                except LLMUnavailable:
+                    pass
+
+            repair_prompt = (
+                "下面是一段模型输出，但它不是合法 JSON。请只修复语法，保留原有字段和含义，"
+                "不要补充解释、不要 markdown、不要改变为数组，最终只输出一个合法 JSON 对象。\n\n"
+                "原始系统提示：\n"
+                f"{system_prompt[:2000]}\n\n"
+                "原始用户提示摘要：\n"
+                f"{user_prompt[:3000]}\n\n"
+                "待修复内容：\n"
+                f"{text[:12000]}"
+            )
+            repaired = self.invoke_text("你是严格的 JSON 修复器。", repair_prompt)
+            try:
+                data = _parse_json_object(repaired)
+                append_log(self.run_id, "LLM", "JSON 模型修复成功")
+                return data
+            except LLMUnavailable as second_error:
+                raise LLMUnavailable(
+                    f"{first_error}；自动修复失败：{second_error}"
+                ) from second_error
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
-    text = text.strip()
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1)
-    else:
-        brace = text.find("{")
-        last = text.rfind("}")
-        if brace != -1 and last != -1 and last > brace:
-            text = text[brace : last + 1]
+    text = _extract_json_text(text)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -213,3 +250,25 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise LLMUnavailable("模型 JSON 顶层必须是对象")
     return data
+
+
+def _extract_json_text(text: str) -> str:
+    text = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    else:
+        brace = text.find("{")
+        last = text.rfind("}")
+        if brace != -1 and last != -1 and last > brace:
+            return text[brace : last + 1].strip()
+    return text
+
+
+def _cleanup_json_text(text: str) -> str:
+    """修复常见非结构性噪声；复杂缺逗号等问题交给模型修复。"""
+    cleaned = _extract_json_text(text)
+    cleaned = cleaned.replace("\ufeff", "").replace("\u00a0", " ")
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+    cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", cleaned)
+    return cleaned.strip()

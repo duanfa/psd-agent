@@ -37,6 +37,13 @@ class UpdateBrandRuleMarkdownRequest(BaseModel):
     markdown: str
 
 
+class DesignFeedbackRequest(BaseModel):
+    feedback_type: str = "designer_edit"
+    author: str = "designer"
+    changes: list[dict[str, object]] = Field(default_factory=list)
+    notes: str = ""
+
+
 class BrandRequest(BaseModel):
     name: str
     status: str = "active"
@@ -102,6 +109,35 @@ def cancel_workflow(run_id: str) -> dict[str, str]:
 @app.get("/api/workflows/{run_id}/logs")
 def workflow_logs(run_id: str) -> dict[str, object]:
     return get_run_snapshot(run_id)
+
+
+@app.get("/api/workflows/{run_id}/feedback")
+def workflow_feedback(run_id: str) -> dict[str, object]:
+    return database.list_design_feedback(run_id)
+
+
+@app.post("/api/workflows/{run_id}/feedback")
+def create_workflow_feedback(
+    run_id: str,
+    payload: DesignFeedbackRequest,
+) -> dict[str, object]:
+    try:
+        result = database.record_design_feedback(
+            run_id=run_id,
+            feedback_type=payload.feedback_type,
+            author=payload.author,
+            changes=payload.changes,
+            notes=payload.notes,
+        )
+        append_log(
+            run_id,
+            "Feedback",
+            "设计师反馈已记录，不自动覆盖品牌规则",
+            result,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/config/defaults")
@@ -422,6 +458,33 @@ def update_brand_rule_markdown(
 ) -> dict[str, object]:
     try:
         return database.update_brand_rule_markdown(rule_id, payload.markdown)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/brand-rules/{rule_id}/publish")
+def publish_brand_rule(rule_id: int) -> dict[str, object]:
+    try:
+        return database.publish_brand_rule_version(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/brand-rules/{rule_id}/rollback")
+def rollback_brand_rule(rule_id: int) -> dict[str, object]:
+    try:
+        return database.rollback_brand_rule_version(rule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/brand-rules/diff")
+def diff_brand_rules(
+    base_rule_id: int = Query(...),
+    compare_rule_id: int = Query(...),
+) -> dict[str, object]:
+    try:
+        return database.diff_brand_rule_versions(base_rule_id, compare_rule_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -793,6 +856,8 @@ def download_artifact(run_id: str, name: str) -> FileResponse:
         "preview.svg": "image/svg+xml",
         "design_spec.json": "application/json",
         "create_detail_page.jsx": "text/plain",
+        "create_figma_page.ts": "text/plain",
+        "editable_detail_page.html": "text/html",
         "README.md": "text/markdown",
     }
     if name not in allowed:

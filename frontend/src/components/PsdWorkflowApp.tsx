@@ -24,8 +24,10 @@ import {
   API_BASE,
   artifactUrl,
   cancelWorkflow,
+  createWorkflowFeedback,
   fetchBrandRuleOptions,
   fetchDefaults,
+  fetchWorkflowFeedback,
   fetchWorkflowLogs,
   generateWorkflow,
   type AgentPrompts,
@@ -158,6 +160,12 @@ export function PsdWorkflowApp() {
   const [draftReady, setDraftReady] = useState(false);
   const [draftMessage, setDraftMessage] = useState("正在检查草稿箱...");
   const [activeTab, setActiveTab] = useState<PageTab>("workflow");
+  const [feedbackNotes, setFeedbackNotes] = useState("");
+  const [feedbackAuthor, setFeedbackAuthor] = useState("designer");
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
+  const [feedbackItems, setFeedbackItems] = useState<
+    Array<{ id: number; notes: string; author: string; createdAt?: string | null }>
+  >([]);
   const draftSaveTimer = useRef<number | null>(null);
   const skipNextDraftSave = useRef(true);
   const [error, setError] = useState<string | null>(null);
@@ -361,6 +369,8 @@ export function PsdWorkflowApp() {
       setLiveStages(snapshot.stages);
       setWorkflowLogStatus(snapshot.status);
       setCurrentStageId(snapshot.current_stage ?? null);
+      const feedback = await fetchWorkflowFeedback(runId);
+      setFeedbackItems(feedback.items);
     } catch (err) {
       try {
         const snapshot = await fetchWorkflowLogs(runId);
@@ -376,6 +386,33 @@ export function PsdWorkflowApp() {
       setLoading(false);
       setCancelling(false);
       setCurrentRunId(null);
+    }
+  };
+
+  const handleSaveFeedback = async () => {
+    if (!result?.run_id || !feedbackNotes.trim()) return;
+    setFeedbackSaving(true);
+    setError(null);
+    try {
+      const item = await createWorkflowFeedback({
+        runId: result.run_id,
+        feedbackType: "designer_edit",
+        author: feedbackAuthor,
+        changes: [
+          {
+            type: "notes",
+            source: "result_panel",
+            trackedChanges: ["字体字号调整", "颜色调整", "布局调整", "文案修改", "图片替换"],
+          },
+        ],
+        notes: feedbackNotes,
+      });
+      setFeedbackItems((current) => [item, ...current]);
+      setFeedbackNotes("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFeedbackSaving(false);
     }
   };
 
@@ -984,7 +1021,7 @@ export function PsdWorkflowApp() {
                 <Sparkles size={28} />
                 <p>
                   配置好参数后点击「运行 BrandOS 任务」，这里会显示品牌规则、页面结构、
-                  详情页预览图、设计评分和可下载的设计 JSON / PSD 兼容脚本。
+                  详情页预览图、设计评分和可下载的设计 JSON / Figma 脚本 / PSD 脚本。
                 </p>
               </div>
             ) : null}
@@ -1048,6 +1085,22 @@ export function PsdWorkflowApp() {
                   </a>
                   <a
                     className="download"
+                    href={artifactUrl(result.run_id, "create_figma_page.ts")}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <Download size={14} /> Figma 插件 TS
+                  </a>
+                  <a
+                    className="download"
+                    href={artifactUrl(result.run_id, "editable_detail_page.html")}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    <FileText size={14} /> 可编辑 HTML
+                  </a>
+                  <a
+                    className="download"
                     href={artifactUrl(result.run_id, "README.md")}
                     rel="noreferrer"
                     target="_blank"
@@ -1075,6 +1128,51 @@ export function PsdWorkflowApp() {
                     <pre>{result.warnings.join("\n")}</pre>
                   </details>
                 ) : null}
+
+                <div className="feedback-card">
+                  <div className="card-label">设计反馈沉淀</div>
+                  <p className="hint">
+                    只记录设计师修改与审核意见，不自动强化学习、不自动覆盖品牌规则。
+                  </p>
+                  <div className="grid-2">
+                    <Field label="记录人">
+                      <input
+                        value={feedbackAuthor}
+                        onChange={(event) => setFeedbackAuthor(event.target.value)}
+                      />
+                    </Field>
+                    <Field label="反馈类型">
+                      <input disabled value="designer_edit" />
+                    </Field>
+                  </div>
+                  <textarea
+                    className="feedback-textarea"
+                    placeholder="例如：首屏标题缩小到 44px；第三屏图片改为正面细节；CTA 颜色降低饱和度。"
+                    value={feedbackNotes}
+                    onChange={(event) => setFeedbackNotes(event.target.value)}
+                  />
+                  <div className="split-line">
+                    <span className="hint">已记录 {feedbackItems.length} 条反馈</span>
+                    <button
+                      className="btn ghost"
+                      disabled={feedbackSaving || !feedbackNotes.trim()}
+                      type="button"
+                      onClick={handleSaveFeedback}
+                    >
+                      {feedbackSaving ? "保存中..." : "保存反馈"}
+                    </button>
+                  </div>
+                  {feedbackItems.length ? (
+                    <div className="record-list">
+                      {feedbackItems.slice(0, 3).map((item) => (
+                        <div className="record-item" key={item.id}>
+                          <strong>{item.author}</strong>
+                          <div className="subtitle">{item.notes}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </div>

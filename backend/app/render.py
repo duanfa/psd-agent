@@ -319,7 +319,166 @@ for (var i = 0; i < spec.modules.length; i++) {
 
   y += m.height;
 }
+
+var outFile = new File((new File($.fileName)).parent.fsName + "/editable_detail_page.psd");
+var psdOptions = new PhotoshopSaveOptions();
+psdOptions.layers = true;
+doc.saveAs(outFile, psdOptions, true, Extension.LOWERCASE);
 """ % payload
+
+
+def render_figma_plugin_ts(spec: dict[str, Any]) -> str:
+    payload = json.dumps(spec, ensure_ascii=False, indent=2)
+    return """// Figma Plugin 脚本：在 Figma 插件中运行后生成可编辑详情页 Frame。
+// 用法：创建一个空插件，将本文件内容粘贴到 code.ts，运行插件。
+const spec = %s;
+
+async function main() {
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+  await figma.loadFontAsync({ family: "Inter", style: "Bold" });
+
+  const frame = figma.createFrame();
+  frame.name = `${spec.project.brand} / ${spec.project.product} / Detail Page`;
+  frame.resize(spec.canvas.width, spec.canvas.height);
+  frame.fills = [{ type: "SOLID", color: hexToRgb(spec.canvas.background_color) }];
+  frame.layoutMode = "VERTICAL";
+  frame.counterAxisSizingMode = "FIXED";
+  frame.primaryAxisSizingMode = "FIXED";
+
+  let y = 0;
+  for (const module of spec.modules) {
+    const section = figma.createFrame();
+    section.name = module.layer_group || `${module.index}_Module`;
+    section.resize(spec.canvas.width, module.height);
+    section.x = 0;
+    section.y = y;
+    section.fills = [{ type: "SOLID", color: hexToRgb(module.index %% 2 ? "#ffffff" : "#f4f6f8") }];
+    frame.appendChild(section);
+
+    const accent = figma.createRectangle();
+    accent.name = "BG_品牌强调条";
+    accent.resize(6, 40);
+    accent.x = 24;
+    accent.y = 30;
+    accent.cornerRadius = 3;
+    accent.fills = [{ type: "SOLID", color: hexToRgb(spec.canvas.accent_color) }];
+    section.appendChild(accent);
+
+    const copy = module.copy || {};
+    addText(section, "TXT_主标题", copy.headline || module.name, 40, 64, spec.typography.title_size + 8, true, spec.typography.text_color);
+    addText(section, "TXT_副标题", copy.subtitle || "", 40, 112, spec.typography.subtitle_size + 2, false, spec.canvas.accent_color);
+    addText(section, "TXT_正文", copy.body || "", 40, 154, Math.max(14, spec.typography.body_size + 4), false, "#4b5563");
+    (copy.points || []).slice(0, 5).forEach((point: string, index: number) => {
+      addText(section, `TXT_要点${index + 1}`, `• ${point}`, 40, 204 + index * 28, Math.max(14, spec.typography.body_size + 4), false, "#374151");
+    });
+
+    if (module.role !== "brand_story" && module.role !== "cta") {
+      const imageBox = figma.createRectangle();
+      imageBox.name = `IMG_${module.image_role || "图片占位"}${module.image_file ? ` / ${module.image_file}` : ""}`;
+      imageBox.x = Math.round(spec.canvas.width * 0.4);
+      imageBox.y = 150;
+      imageBox.resize(spec.canvas.width - imageBox.x - 40, Math.max(120, module.height - 190));
+      imageBox.cornerRadius = 18;
+      imageBox.fills = [{ type: "SOLID", color: hexToRgb("#e2e8f0") }];
+      imageBox.strokes = [{ type: "SOLID", color: hexToRgb("#cbd5e1") }];
+      section.appendChild(imageBox);
+      addText(section, "IMG_替换提示", module.image_file ? `替换为 ${module.image_file}` : (module.image_role || "图片素材占位"), imageBox.x + 20, imageBox.y + 34, 14, false, "#64748b");
+    }
+
+    y += module.height;
+  }
+
+  figma.currentPage.appendChild(frame);
+  figma.viewport.scrollAndZoomIntoView([frame]);
+  figma.closePlugin("BrandOS 可编辑 Figma 页面已生成");
+}
+
+function addText(parent: FrameNode, name: string, content: string, x: number, y: number, size: number, bold: boolean, color: string) {
+  if (!content) return;
+  const text = figma.createText();
+  text.name = name;
+  text.characters = content;
+  text.fontName = { family: "Inter", style: bold ? "Bold" : "Regular" };
+  text.fontSize = size;
+  text.x = x;
+  text.y = y;
+  text.fills = [{ type: "SOLID", color: hexToRgb(color) }];
+  text.resizeWithoutConstraints(Math.max(80, spec.canvas.width * 0.36), text.height);
+  parent.appendChild(text);
+}
+
+function hexToRgb(hex: string) {
+  const normalized = String(hex || "#ffffff").replace("#", "");
+  const value = parseInt(normalized.length === 3 ? normalized.split("").map((c) => c + c).join("") : normalized, 16);
+  return {
+    r: ((value >> 16) & 255) / 255,
+    g: ((value >> 8) & 255) / 255,
+    b: (value & 255) / 255,
+  };
+}
+
+main();
+""" % payload
+
+
+def render_editable_html(spec: dict[str, Any]) -> str:
+    modules = []
+    for module in spec["modules"]:
+        copy = module.get("copy", {})
+        points = "".join(
+            f'<li contenteditable="true">{_esc(point)}</li>'
+            for point in copy.get("points", [])[:5]
+        )
+        image = (
+            f'<div class="image-box" contenteditable="true">替换图片：{_esc(module.get("image_file") or module.get("image_role") or "图片素材")}</div>'
+            if module.get("role") not in ("brand_story", "cta")
+            else ""
+        )
+        modules.append(
+            f"""
+            <section class="module" style="min-height:{int(module["height"])}px">
+              <div class="copy">
+                <div class="accent"></div>
+                <h2 contenteditable="true">{_esc(copy.get("headline") or module["name"])}</h2>
+                <h3 contenteditable="true">{_esc(copy.get("subtitle") or "")}</h3>
+                <p contenteditable="true">{_esc(copy.get("body") or "")}</p>
+                <ul>{points}</ul>
+              </div>
+              {image}
+            </section>
+            """
+        )
+    return textwrap.dedent(
+        f"""<!doctype html>
+        <html lang="zh-CN">
+        <head>
+          <meta charset="utf-8" />
+          <title>{_esc(spec["project"]["name"])} - 可编辑审稿稿</title>
+          <style>
+            body {{ margin: 0; background: #e5e7eb; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; }}
+            .page {{ width: {int(spec["canvas"]["width"])}px; margin: 24px auto; background: {_esc(spec["canvas"]["background_color"])}; box-shadow: 0 18px 50px rgba(15,23,42,.18); }}
+            .toolbar {{ position: sticky; top: 0; z-index: 2; padding: 12px 16px; background: #111827; color: white; font-size: 13px; }}
+            .module {{ display: grid; grid-template-columns: 38% 1fr; gap: 30px; padding: 36px 40px; border-bottom: 1px solid #d8dee9; background: white; }}
+            .module:nth-child(even) {{ background: #f8fafc; }}
+            .copy {{ position: relative; }}
+            .accent {{ width: 6px; height: 40px; border-radius: 4px; background: {_esc(spec["canvas"]["accent_color"])}; margin-bottom: 18px; }}
+            h2 {{ margin: 0 0 14px; font-size: {int(spec["typography"].get("title_size", 28)) + 8}px; color: {_esc(spec["typography"].get("text_color", "#1f2937"))}; }}
+            h3 {{ min-height: 24px; margin: 0 0 18px; font-size: {int(spec["typography"].get("subtitle_size", 18)) + 2}px; color: {_esc(spec["canvas"]["accent_color"])}; }}
+            p, li {{ color: #475569; font-size: {max(14, int(spec["typography"].get("body_size", 10)) + 4)}px; line-height: 1.7; }}
+            ul {{ padding-left: 18px; }}
+            .image-box {{ min-height: 260px; display: grid; place-items: center; border: 1px dashed #94a3b8; border-radius: 20px; background: #e2e8f0; color: #64748b; text-align: center; padding: 20px; }}
+            [contenteditable="true"] {{ outline: 1px dashed transparent; border-radius: 6px; }}
+            [contenteditable="true"]:focus {{ outline-color: #4f46e5; background: #eef2ff; }}
+          </style>
+        </head>
+        <body>
+          <div class="toolbar">BrandOS 可编辑审稿稿：点击文字或图片占位说明即可修改，用于设计师初审与反馈记录。</div>
+          <main class="page">
+            {"".join(modules)}
+          </main>
+        </body>
+        </html>"""
+    )
 
 
 def render_readme(spec: dict[str, Any]) -> str:
@@ -337,7 +496,9 @@ def render_readme(spec: dict[str, Any]) -> str:
         - `design_spec.json`：完整结构（含品牌规则分层、模块文案、Figma/PSD 图层树、设计评分、审核清单）。
         - `preview.svg`：详情页低保真预览图（已嵌入上传的产品图/参考图）。
         - `assets/`：本次任务使用的产品图与参考图副本，供 PSD 脚本引用。
-        - `create_detail_page.jsx`：PSD 兼容脚本，运行后生成可编辑文字层、图片层与图层分组初稿。
+        - `create_detail_page.jsx`：Photoshop 脚本，运行后生成并保存 `editable_detail_page.psd`，包含可编辑文字层、图片层与图层分组。
+        - `create_figma_page.ts`：Figma 插件脚本，运行后生成可编辑 Frame、文本层和图片占位层。
+        - `editable_detail_page.html`：浏览器可编辑审稿稿，用于快速改文案和记录反馈。
 
         ## 模块结构
         {modules}
@@ -359,6 +520,8 @@ def write_artifacts(
         "preview_svg": output_dir / "preview.svg",
         "design_spec": output_dir / "design_spec.json",
         "photoshop_jsx": output_dir / "create_detail_page.jsx",
+        "figma_plugin": output_dir / "create_figma_page.ts",
+        "editable_html": output_dir / "editable_detail_page.html",
         "readme": output_dir / "README.md",
     }
     files["preview_svg"].write_text(
@@ -368,5 +531,7 @@ def write_artifacts(
         json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     files["photoshop_jsx"].write_text(render_photoshop_jsx(spec), encoding="utf-8")
+    files["figma_plugin"].write_text(render_figma_plugin_ts(spec), encoding="utf-8")
+    files["editable_html"].write_text(render_editable_html(spec), encoding="utf-8")
     files["readme"].write_text(render_readme(spec), encoding="utf-8")
     return {key: str(value) for key, value in files.items()}

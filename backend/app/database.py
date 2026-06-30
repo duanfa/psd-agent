@@ -231,7 +231,21 @@ class WorkflowArtifact(Base):
     preview_svg: Mapped[str] = mapped_column(String(1024))
     design_spec_path: Mapped[str] = mapped_column(String(1024))
     photoshop_jsx: Mapped[str] = mapped_column(String(1024))
+    figma_plugin: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    editable_html: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     readme: Mapped[str] = mapped_column(String(1024))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class DesignFeedback(Base):
+    __tablename__ = "design_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("workflow_runs.run_id"), index=True)
+    feedback_type: Mapped[str] = mapped_column(String(64), default="designer_edit")
+    author: Mapped[str] = mapped_column(String(100), default="designer")
+    changes: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -249,7 +263,25 @@ def _ensure_schema_upgrades() -> None:
     if engine is None:
         return
     inspector = inspect(engine)
-    if "brand_rules" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "workflow_artifacts" in table_names:
+        artifact_existing = {
+            column["name"] for column in inspector.get_columns("workflow_artifacts")
+        }
+        artifact_statements: list[str] = []
+        if "figma_plugin" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN figma_plugin VARCHAR(1024) NULL"
+            )
+        if "editable_html" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN editable_html VARCHAR(1024) NULL"
+            )
+        if artifact_statements:
+            with engine.begin() as connection:
+                for statement in artifact_statements:
+                    connection.execute(text(statement))
+    if "brand_rules" not in table_names:
         return
     existing = {column["name"] for column in inspector.get_columns("brand_rules")}
     statements: list[str] = []
@@ -317,6 +349,7 @@ def persist_run_started(run_id: str, request: Any, assets: list[Any]) -> None:
         run.request_payload = payload
         run.updated_at = datetime.utcnow()
         session.merge(run)
+        session.flush()
 
         session.query(WorkflowAsset).filter(WorkflowAsset.run_id == run_id).delete()
         for asset in assets:
@@ -361,6 +394,7 @@ def persist_log(run_id: str, scope: str, title: str, message: str, payload: Any 
             return
         if session.get(WorkflowRun, run_id) is None:
             session.add(WorkflowRun(run_id=run_id, status="running"))
+            session.flush()
         session.add(
             WorkflowLog(
                 run_id=run_id,
@@ -428,6 +462,8 @@ def persist_run_completed(
                 preview_svg=artifact_paths["preview_svg"],
                 design_spec_path=artifact_paths["design_spec"],
                 photoshop_jsx=artifact_paths["photoshop_jsx"],
+                figma_plugin=artifact_paths.get("figma_plugin"),
+                editable_html=artifact_paths.get("editable_html"),
                 readme=artifact_paths["readme"],
             )
         )
@@ -1315,6 +1351,160 @@ def update_brand_rule_markdown(rule_id: int, markdown: str) -> dict[str, Any]:
         rule.updated_at = datetime.utcnow()
         session.merge(rule)
         return {"id": rule.id, "version": rule.version, "markdown": rule.markdown}
+
+
+def publish_brand_rule_version(rule_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        rule = session.get(BrandRule, rule_id)
+        if rule is None:
+            raise ValueError("brand rule not found")
+        active_rules = session.execute(
+            select(BrandRule).where(
+                BrandRule.brand_id == rule.brand_id,
+                BrandRule.status == "active",
+                BrandRule.id != rule.id,
+            )
+        ).scalars()
+        for item in active_rules:
+            item.status = "archived"
+            item.updated_at = datetime.utcnow()
+        rule.status = "active"
+        rule.updated_at = datetime.utcnow()
+        session.merge(rule)
+        return {"id": rule.id, "version": rule.version, "status": rule.status}
+
+
+def rollback_brand_rule_version(rule_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        target = session.get(BrandRule, rule_id)
+        if target is None:
+            raise ValueError("brand rule not found")
+        active_rules = session.execute(
+            select(BrandRule).where(
+                BrandRule.brand_id == target.brand_id,
+                BrandRule.status == "active",
+                BrandRule.id != target.id,
+            )
+        ).scalars()
+        for item in active_rules:
+            item.status = "rolled_back"
+            item.updated_at = datetime.utcnow()
+        target.status = "active"
+        target.updated_at = datetime.utcnow()
+        session.merge(target)
+        return {"id": target.id, "version": target.version, "status": target.status}
+
+
+def diff_brand_rule_versions(base_rule_id: int, compare_rule_id: int) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        base = session.get(BrandRule, base_rule_id)
+        compare = session.get(BrandRule, compare_rule_id)
+        if base is None or compare is None:
+            raise ValueError("brand rule not found")
+        if base.brand_id != compare.brand_id:
+            raise ValueError("versions do not belong to the same brand")
+
+        def keyed(items: list[dict[str, Any]] | None) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for item in items or []:
+                title = str(item.get("title") or "").strip()
+                if title:
+                    result[title] = str(item.get("description") or "").strip()
+            return result
+
+        sections = {
+            "designRules": (base.design_rules, compare.design_rules),
+            "layoutRules": (base.layout_rules, compare.layout_rules),
+            "components": (base.components, compare.components),
+            "promptTemplates": (base.prompt_templates, compare.prompt_templates),
+        }
+        diff: dict[str, Any] = {}
+        for section, (left_items, right_items) in sections.items():
+            left = keyed(left_items)
+            right = keyed(right_items)
+            left_keys = set(left)
+            right_keys = set(right)
+            changed = [
+                {"title": key, "from": left[key], "to": right[key]}
+                for key in sorted(left_keys & right_keys)
+                if left[key] != right[key]
+            ]
+            diff[section] = {
+                "added": [{"title": key, "description": right[key]} for key in sorted(right_keys - left_keys)],
+                "removed": [{"title": key, "description": left[key]} for key in sorted(left_keys - right_keys)],
+                "changed": changed,
+            }
+        return {
+            "base": {"id": base.id, "version": base.version, "status": base.status},
+            "compare": {"id": compare.id, "version": compare.version, "status": compare.status},
+            "diff": diff,
+        }
+
+
+def record_design_feedback(
+    run_id: str,
+    feedback_type: str,
+    author: str,
+    changes: list[dict[str, Any]],
+    notes: str,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        run = session.get(WorkflowRun, run_id)
+        if run is None:
+            raise ValueError("workflow run not found")
+        row = DesignFeedback(
+            run_id=run_id,
+            feedback_type=feedback_type.strip() or "designer_edit",
+            author=author.strip() or "designer",
+            changes=_jsonable(changes),
+            notes=notes.strip(),
+        )
+        session.add(row)
+        session.flush()
+        return {
+            "id": row.id,
+            "runId": row.run_id,
+            "feedbackType": row.feedback_type,
+            "author": row.author,
+            "changes": row.changes or [],
+            "notes": row.notes,
+            "createdAt": row.created_at.isoformat() if row.created_at else None,
+        }
+
+
+def list_design_feedback(run_id: str) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            return {"items": []}
+        rows = list(
+            session.execute(
+                select(DesignFeedback)
+                .where(DesignFeedback.run_id == run_id)
+                .order_by(DesignFeedback.created_at.desc(), DesignFeedback.id.desc())
+            ).scalars()
+        )
+        return {
+            "items": [
+                {
+                    "id": row.id,
+                    "runId": row.run_id,
+                    "feedbackType": row.feedback_type,
+                    "author": row.author,
+                    "changes": row.changes or [],
+                    "notes": row.notes,
+                    "createdAt": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+        }
 
 
 def delete_brand_rule_version(rule_id: int) -> dict[str, Any]:

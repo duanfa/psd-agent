@@ -146,6 +146,8 @@ class WorkflowArtifacts(BaseModel):
     preview_svg: str
     design_spec: str
     photoshop_jsx: str
+    figma_plugin: str
+    editable_html: str
     readme: str
 
 

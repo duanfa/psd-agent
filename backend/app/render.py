@@ -4,6 +4,7 @@ import base64
 import html
 import json
 import mimetypes
+import os
 import shutil
 import textwrap
 from pathlib import Path
@@ -157,6 +158,7 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
             "detail_page_rule": ctx.detail_page_rule,
         },
         "design_direction": ctx.design_direction,
+        "generated_images": ctx.generated_images,
         "modules": modules,
         "psd_layers": ctx.psd_layers,
         "design_score": ctx.design_score,
@@ -197,6 +199,40 @@ def _copy_assets_to_output(output_dir: Path, ctx: PipelineContext) -> dict[str, 
         if not dest.exists() or dest.stat().st_size != src.stat().st_size:
             shutil.copy2(src, dest)
         rel_paths[name] = f"assets/{name}"
+    return rel_paths
+
+
+def _generated_svg_payload(item: dict[str, Any]) -> str:
+    title = _esc(item.get("module_name") or item.get("image_role") or "Generated Image")
+    subtitle = _esc(item.get("prompt") or item.get("source") or "generated")
+    return textwrap.dedent(
+        f"""<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="900" viewBox="0 0 1200 900">
+        <rect width="1200" height="900" fill="#dbe3ea"/>
+        <rect x="48" y="48" width="1104" height="804" rx="28" fill="#f8fafc" stroke="#cbd5e1" stroke-width="4"/>
+        <rect x="96" y="96" width="180" height="10" rx="5" fill="#1f2937" opacity="0.18"/>
+        <rect x="96" y="132" width="520" height="56" rx="12" fill="#1f2937" opacity="0.88"/>
+        <rect x="96" y="214" width="780" height="26" rx="10" fill="#64748b" opacity="0.35"/>
+        <rect x="96" y="268" width="1008" height="468" rx="24" fill="#e2e8f0"/>
+        <rect x="132" y="304" width="936" height="396" rx="20" fill="#cbd5e1" stroke="#94a3b8" stroke-dasharray="18 12" />
+        <text x="96" y="188" font-size="44" font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="#ffffff">{title}</text>
+        <text x="96" y="790" font-size="24" font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="#334155">{subtitle}</text>
+        </svg>"""
+    )
+
+
+def _write_generated_assets(output_dir: Path, ctx: PipelineContext) -> dict[str, str]:
+    assets_dir = output_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    rel_paths: dict[str, str] = {}
+    for item in ctx.generated_images:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        safe_name = name if name.lower().endswith(".svg") else f"{name}.svg"
+        target = assets_dir / safe_name
+        target.write_text(_generated_svg_payload(item), encoding="utf-8")
+        rel_paths[safe_name] = f"assets/{safe_name}"
+        item["name"] = safe_name
     return rel_paths
 
 
@@ -709,6 +745,7 @@ def write_artifacts(
 ) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rel_paths = _copy_assets_to_output(output_dir, ctx)
+    rel_paths.update(_write_generated_assets(output_dir, ctx))
     _resolve_module_images(spec["modules"], rel_paths)
     files = {
         "preview_svg": output_dir / "preview.svg",
@@ -728,4 +765,26 @@ def write_artifacts(
     files["figma_plugin"].write_text(render_figma_plugin_ts(spec), encoding="utf-8")
     files["editable_html"].write_text(render_editable_html(spec), encoding="utf-8")
     files["readme"].write_text(render_readme(spec), encoding="utf-8")
-    return {key: str(value) for key, value in files.items()}
+    template = os.getenv("BRANDOS_FIGMA_URL_TEMPLATE", "").strip()
+    figma_url = ""
+    export_status = "fallback_script"
+    export_mode = "script"
+    export_error = "未配置真实 Figma 导出适配器，已回退为脚本导出。"
+    if template:
+        try:
+            figma_url = template.format(
+                run_id=ctx.run_id,
+                brand=spec["project"]["brand"],
+                product=spec["project"]["product"],
+            )
+            export_status = "completed"
+            export_mode = "figma_url"
+            export_error = ""
+        except Exception as exc:
+            export_error = f"Figma URL 模板渲染失败：{exc}"
+    result = {key: str(value) for key, value in files.items()}
+    result["figma_url"] = figma_url
+    result["export_status"] = export_status
+    result["export_mode"] = export_mode
+    result["export_error"] = export_error
+    return result

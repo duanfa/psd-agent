@@ -149,6 +149,10 @@ class WorkflowArtifacts(BaseModel):
     design_spec: str
     photoshop_jsx: str
     figma_plugin: str
+    figma_url: str | None = None
+    export_status: str | None = None
+    export_mode: str | None = None
+    export_error: str | None = None
     editable_html: str
     readme: str
 

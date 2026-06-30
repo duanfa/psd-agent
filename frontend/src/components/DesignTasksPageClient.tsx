@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import {
   fetchDesignTasksPageWithFilters,
@@ -169,7 +170,11 @@ export function DesignTasksPageClient({ initialData }: { initialData: DesignTask
               {data.tasks.length ? (
                 data.tasks.map((item) => (
                   <tr key={item.taskId}>
-                    <td>{item.taskId}</td>
+                    <td>
+                      <Link className="table-link" href={`/design-tasks/${item.runId}`}>
+                        {item.taskId}
+                      </Link>
+                    </td>
                     <td>{item.brand}</td>
                     <td>{item.product}</td>
                     <td>{item.taskType}</td>

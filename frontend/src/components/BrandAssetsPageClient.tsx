@@ -11,6 +11,7 @@ import {
   fetchBrandAssetsPageWithFilters,
   type BrandAssetPreviewResponse,
   type BrandAssetsPageResponse,
+  updateBrandAssetTrainingMeta,
   updateBrand,
   uploadBrandAssets,
 } from "@/lib/api";
@@ -42,6 +43,12 @@ interface BrandFormState {
   status: string;
 }
 
+interface AssetTrainingDraft {
+  trainingRole: string;
+  includeInTraining: boolean;
+  qualityLevel: string;
+}
+
 export function BrandAssetsPageClient({ initialData }: { initialData: BrandAssetsPageResponse }) {
   const [data, setData] = useState(initialData);
   const [filters, setFilters] = useState<FiltersState>({
@@ -60,6 +67,7 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
   const [uploading, setUploading] = useState(false);
   const [savingBrand, setSavingBrand] = useState(false);
   const [deletingAssetId, setDeletingAssetId] = useState<number | null>(null);
+  const [savingAssetId, setSavingAssetId] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<BrandAssetPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -68,6 +76,7 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
     status: "active",
   });
   const searchTimer = useRef<number | null>(null);
+  const [assetDrafts, setAssetDrafts] = useState<Record<number, AssetTrainingDraft>>({});
 
   useEffect(() => {
     setUpload((current) => ({
@@ -84,6 +93,18 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
       const next = await fetchBrandAssetsPageWithFilters(nextFilters);
       setData(next);
       setFilters(next.filters);
+      setAssetDrafts(
+        Object.fromEntries(
+          next.assets.map((asset) => [
+            asset.id,
+            {
+              trainingRole: asset.trainingRole,
+              includeInTraining: asset.includeInTraining,
+              qualityLevel: asset.qualityLevel,
+            },
+          ]),
+        ),
+      );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -207,6 +228,39 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setPreviewLoading(false);
+    }
+  };
+
+  const updateAssetDraft = (assetId: number, patch: Partial<AssetTrainingDraft>) => {
+    setAssetDrafts((current) => ({
+      ...current,
+      [assetId]: {
+        trainingRole: current[assetId]?.trainingRole ?? "reference",
+        includeInTraining: current[assetId]?.includeInTraining ?? false,
+        qualityLevel: current[assetId]?.qualityLevel ?? "normal",
+        ...patch,
+      },
+    }));
+  };
+
+  const handleSaveAssetTrainingMeta = async (assetId: number) => {
+    const draft = assetDrafts[assetId];
+    if (!draft) return;
+    setSavingAssetId(assetId);
+    setMessage(null);
+    try {
+      await updateBrandAssetTrainingMeta({
+        assetId,
+        trainingRole: draft.trainingRole,
+        includeInTraining: draft.includeInTraining,
+        qualityLevel: draft.qualityLevel,
+      });
+      await loadData(filters);
+      setMessage("资产训练治理信息已更新。");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingAssetId(null);
     }
   };
 
@@ -368,56 +422,116 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
                     <th>类型</th>
                     <th>来源</th>
                     <th>状态</th>
+                    <th>训练角色</th>
+                    <th>训练池</th>
+                    <th>质量等级</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.assets.length ? (
-                    data.assets.map((asset) => (
-                      <tr key={asset.id}>
-                        <td>{asset.name}</td>
-                        <td>{asset.folder}</td>
-                        <td>{asset.type}</td>
-                        <td>{asset.source}</td>
-                        <td>
-                          <span
-                            className={`asset-status ${
-                              asset.status === "待校验" ? "warning" : "success"
-                            }`}
-                          >
-                            {asset.status}
-                          </span>
-                        </td>
-                        <td>
-                          <div className="table-actions">
-                            <button
-                              className="table-action"
-                              disabled={previewLoading}
-                              type="button"
-                              onClick={() => handlePreview(asset.id)}
+                    data.assets.map((asset) => {
+                      const draft = assetDrafts[asset.id] ?? {
+                        trainingRole: asset.trainingRole,
+                        includeInTraining: asset.includeInTraining,
+                        qualityLevel: asset.qualityLevel,
+                      };
+                      return (
+                        <tr key={asset.id}>
+                          <td>{asset.name}</td>
+                          <td>{asset.folder}</td>
+                          <td>{asset.type}</td>
+                          <td>{asset.source}</td>
+                          <td>
+                            <span
+                              className={`asset-status ${
+                                asset.status === "待校验" ? "warning" : "success"
+                              }`}
                             >
-                              预览
-                            </button>
-                            <button
-                              className="table-action danger"
-                              disabled={deletingAssetId === asset.id}
-                              type="button"
-                              onClick={() => handleDeleteAsset(asset.id)}
+                              {asset.status}
+                            </span>
+                          </td>
+                          <td>
+                            <select
+                              value={draft.trainingRole}
+                              onChange={(e) =>
+                                updateAssetDraft(asset.id, { trainingRole: e.target.value })
+                              }
                             >
-                              {deletingAssetId === asset.id ? (
-                                <Loader2 className="spin" size={12} />
-                              ) : (
-                                <Trash2 size={12} />
-                              )}
-                              删除
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
+                              <option value="core">核心规范</option>
+                              <option value="high_quality">高质量案例</option>
+                              <option value="reference">普通参考</option>
+                              <option value="excluded">排除样本</option>
+                            </select>
+                          </td>
+                          <td>
+                            <label className="switch compact-switch">
+                              <input
+                                checked={draft.includeInTraining}
+                                type="checkbox"
+                                onChange={(e) =>
+                                  updateAssetDraft(asset.id, {
+                                    includeInTraining: e.target.checked,
+                                  })
+                                }
+                              />
+                              <span className="switch-track" />
+                            </label>
+                          </td>
+                          <td>
+                            <select
+                              value={draft.qualityLevel}
+                              onChange={(e) =>
+                                updateAssetDraft(asset.id, { qualityLevel: e.target.value })
+                              }
+                            >
+                              <option value="high">high</option>
+                              <option value="normal">normal</option>
+                              <option value="low">low</option>
+                            </select>
+                          </td>
+                          <td>
+                            <div className="table-actions">
+                              <button
+                                className="table-action"
+                                disabled={previewLoading}
+                                type="button"
+                                onClick={() => handlePreview(asset.id)}
+                              >
+                                预览
+                              </button>
+                              <button
+                                className="table-action"
+                                disabled={savingAssetId === asset.id}
+                                type="button"
+                                onClick={() => handleSaveAssetTrainingMeta(asset.id)}
+                              >
+                                {savingAssetId === asset.id ? (
+                                  <Loader2 className="spin" size={12} />
+                                ) : null}
+                                保存治理
+                              </button>
+                              <button
+                                className="table-action danger"
+                                disabled={deletingAssetId === asset.id}
+                                type="button"
+                                onClick={() => handleDeleteAsset(asset.id)}
+                              >
+                                {deletingAssetId === asset.id ? (
+                                  <Loader2 className="spin" size={12} />
+                                ) : (
+                                  <Trash2 size={12} />
+                                )}
+                                删除
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
                   ) : (
                     <tr>
-                      <td className="table-empty" colSpan={6}>
+                      <td className="table-empty" colSpan={9}>
                         没有匹配的资产记录。
                       </td>
                     </tr>
@@ -506,6 +620,9 @@ export function BrandAssetsPageClient({ initialData }: { initialData: BrandAsset
             <div className="asset-preview-meta">
               <span>来源：{preview.source || "未知来源"}</span>
               <span>状态：{preview.status}</span>
+              <span>训练角色：{preview.trainingRole}</span>
+              <span>纳入训练：{preview.includeInTraining ? "是" : "否"}</span>
+              <span>质量：{preview.qualityLevel}</span>
               <span>大小：{preview.size ? `${(preview.size / 1024).toFixed(1)} KB` : "未知"}</span>
             </div>
 

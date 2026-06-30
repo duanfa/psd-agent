@@ -54,6 +54,12 @@ class BrandRequest(BaseModel):
     status: str = "active"
 
 
+class BrandAssetTrainingMetaRequest(BaseModel):
+    training_role: str = "reference"
+    include_in_training: bool = False
+    quality_level: str = "normal"
+
+
 class ModelTestMessage(BaseModel):
     role: str
     content: str
@@ -114,6 +120,14 @@ def cancel_workflow(run_id: str) -> dict[str, str]:
 @app.get("/api/workflows/{run_id}/logs")
 def workflow_logs(run_id: str) -> dict[str, object]:
     return get_run_snapshot(run_id)
+
+
+@app.get("/api/workflows/{run_id}")
+def workflow_detail(run_id: str) -> dict[str, object]:
+    detail = database.get_workflow_detail(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="workflow run not found")
+    return detail
 
 
 @app.get("/api/workflows/{run_id}/feedback")
@@ -712,6 +726,22 @@ def delete_brand_asset(asset_id: int) -> dict[str, object]:
     except Exception:
         pass
     return {"id": result["id"], "brandId": result["brandId"]}
+
+
+@app.put("/api/brand-assets/{asset_id}")
+def update_brand_asset_training_meta(
+    asset_id: int,
+    payload: BrandAssetTrainingMetaRequest,
+) -> dict[str, object]:
+    try:
+        return database.update_brand_asset_training_meta(
+            asset_id=asset_id,
+            training_role=payload.training_role,
+            include_in_training=payload.include_in_training,
+            quality_level=payload.quality_level,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def _asset_preview_type(content_type: str, path: Path | None) -> str:

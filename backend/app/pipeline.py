@@ -67,6 +67,7 @@ class PipelineContext:
     structured_info: dict[str, Any] = field(default_factory=dict)
     brand_profile: dict[str, Any] = field(default_factory=dict)
     design_direction: dict[str, Any] = field(default_factory=dict)
+    generated_images: list[dict[str, Any]] = field(default_factory=list)
     modules: list[dict[str, Any]] = field(default_factory=list)
     psd_layers: list[dict[str, Any]] = field(default_factory=list)
     design_score: dict[str, Any] = field(default_factory=dict)
@@ -92,6 +93,10 @@ class PipelineContext:
             for a in self.assets
             if a.bucket == "reference_image" and a.saved_path
         ]
+
+    @property
+    def generated_image_names(self) -> list[str]:
+        return [str(item.get("name") or "") for item in self.generated_images if item.get("name")]
 
     @property
     def image_paths(self) -> list[str]:
@@ -702,6 +707,7 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
             f"选中的详情页 Derived Rule：{json.dumps(ctx.detail_page_rule, ensure_ascii=False)}\n"
             f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"参考案例图片：{ctx.reference_images}\n"
+            f"已生成图片素材：{ctx.generated_image_names}\n"
             f"画布宽度：{req.layout.canvas_width}px，模块数量：{count}\n"
             f"主视觉高度：{req.layout.hero_height}，普通模块高度：{req.layout.module_height}\n"
             f"可用商品图：{ctx.images}\n\n"
@@ -744,6 +750,7 @@ def _normalize_modules(
 ) -> list[dict[str, Any]]:
     req = ctx.request
     images = ctx.images
+    generated_images = ctx.generated_image_names
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(modules):
         role = str(raw.get("role") or ("hero" if index == 0 else "feature"))
@@ -763,10 +770,86 @@ def _normalize_modules(
                 "height": max(300, min(height, 2400)),
                 "image_role": str(raw.get("image_role") or ""),
                 "elements": raw.get("elements") or ["BG_背景", "IMG_图片", "TXT_标题"],
-                "image_candidates": images[index : index + 1] or images[:1],
+                "image_candidates": (
+                    generated_images[index : index + 1]
+                    + images[index : index + 1]
+                    + generated_images[:1]
+                    + images[:1]
+                ),
             }
         )
     return normalized
+
+
+def stage_image_generation(ctx: PipelineContext) -> StageResult:
+    req = ctx.request
+
+    def default_images() -> list[dict[str, Any]]:
+        generated: list[dict[str, Any]] = []
+        for index, item in enumerate(ctx.layout_blueprint, start=1):
+            if item.get("role") in ("brand_story", "cta"):
+                continue
+            generated.append(
+                {
+                    "name": f"generated_{index:02d}_{item.get('role') or 'module'}.svg",
+                    "module_index": index,
+                    "module_name": item.get("name"),
+                    "role": item.get("role"),
+                    "image_role": item.get("image_role") or "模块配图",
+                    "source": "generated_placeholder",
+                    "prompt": f"{req.brand_name} {req.product_name} {item.get('name')} {item.get('image_role') or '配图'}",
+                }
+            )
+        return generated
+
+    def model_fn() -> dict[str, Any]:
+        prompt = (
+            f"品牌：{req.brand_name}\n"
+            f"商品：{req.product_name}\n"
+            f"页面规划：{json.dumps(ctx.design_direction, ensure_ascii=False)}\n"
+            f"模块蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
+            f"已有商品图：{ctx.images}\n"
+            f"参考图：{ctx.reference_images}\n\n"
+            "请输出 images 数组，每个元素包含："
+            "name, module_index, module_name, role, image_role, source, prompt。"
+            "source 取值建议为 ai_generated 或 reference_derived。"
+        )
+        data = ctx.llm.invoke_json(req.prompts.design_agent_prompt, prompt)
+        images = data.get("images")
+        if not isinstance(images, list) or not images:
+            raise LLMUnavailable("图片生成阶段未返回 images 数组")
+        ctx.generated_images = [
+            {
+                "name": str(item.get("name") or f"generated_{idx + 1:02d}.svg"),
+                "module_index": int(item.get("module_index") or idx + 1),
+                "module_name": str(item.get("module_name") or ""),
+                "role": str(item.get("role") or ""),
+                "image_role": str(item.get("image_role") or "模块配图"),
+                "source": str(item.get("source") or "ai_generated"),
+                "prompt": str(item.get("prompt") or ""),
+            }
+            for idx, item in enumerate(images)
+            if isinstance(item, dict)
+        ] or default_images()
+        return {"images": ctx.generated_images}
+
+    def fallback_fn() -> dict[str, Any]:
+        ctx.generated_images = default_images()
+        return {"images": ctx.generated_images}
+
+    def summarize(data: dict[str, Any], used: bool) -> str:
+        images = data.get("images", [])
+        return f"已规划 {len(images)} 张模块配图，供后续 Layout 与导出阶段消费。"
+
+    return _run_stage(
+        "image_generation",
+        "图片生成 Agent",
+        "image",
+        ctx,
+        model_fn,
+        fallback_fn,
+        summarize,
+    )
 
 
 def stage_copy(ctx: PipelineContext) -> StageResult:
@@ -1008,6 +1091,7 @@ PIPELINE_STAGES: list[Callable[[PipelineContext], StageResult]] = [
     stage_structured,
     stage_brand_rag,
     stage_design,
+    stage_image_generation,
     stage_layout,
     stage_copy,
     stage_psd,

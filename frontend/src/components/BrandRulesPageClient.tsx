@@ -51,6 +51,13 @@ function defaultPromptByTarget(target: BrandRuleTarget) {
   return "请从官网素材和品牌资产中提取品牌视觉规范、字体色彩、品牌语气和禁用项，形成稳定的品牌设计规范。";
 }
 
+function defaultAssetIds(
+  assets: Array<{ id: number; includeInTraining?: boolean }>,
+) {
+  const included = assets.filter((item) => item.includeInTraining).map((item) => item.id);
+  return included.length ? included : assets.map((item) => item.id);
+}
+
 type RuleDialogMode = "preview" | "edit";
 type RuleDialogState = {
   mode: RuleDialogMode;
@@ -81,7 +88,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
   const [markdown, setMarkdown] = useState(initialData.markdown);
   const [trainForm, setTrainForm] = useState({
     trainingTarget: initialData.selectedTargetKey ?? ("brand_core" as BrandRuleTarget),
-    assetIds: initialData.sourceAssets.map((item) => item.id),
+    assetIds: defaultAssetIds(initialData.sourceAssets),
     prompt: initialData.trainingPrompt,
     websiteUrls: initialData.websiteUrls.join("\n"),
     baseVersionId: initialData.selectedVersionId ?? null,
@@ -112,7 +119,7 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
       setMarkdown(next.markdown);
       setTrainForm({
         trainingTarget: next.selectedTargetKey ?? "brand_core",
-        assetIds: next.sourceAssets.map((item) => item.id),
+        assetIds: defaultAssetIds(next.sourceAssets),
         prompt: next.trainingPrompt,
         websiteUrls: next.websiteUrls.join("\n"),
         baseVersionId: next.selectedVersionId ?? null,
@@ -819,7 +826,10 @@ export function BrandRulesPageClient({ initialData }: { initialData: BrandRulesP
                         />
                         <span>
                           <b>{asset.name}</b>
-                          <small>{asset.folder} / {asset.status}</small>
+                          <small>
+                            {asset.folder} / {asset.status} / {asset.trainingRole} /{" "}
+                            {asset.includeInTraining ? "已纳入训练池" : "未纳入训练池"} / {asset.qualityLevel}
+                          </small>
                         </span>
                       </label>
                     ))

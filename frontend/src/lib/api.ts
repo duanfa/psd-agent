@@ -139,6 +139,10 @@ export interface WorkflowResult {
     design_spec: string;
     photoshop_jsx: string;
     figma_plugin: string;
+    figma_url?: string | null;
+    export_status?: string | null;
+    export_mode?: string | null;
+    export_error?: string | null;
     editable_html: string;
     readme: string;
   };
@@ -167,6 +171,8 @@ export interface WorkflowLogsResponse {
   current_stage?: string | null;
   logs: string[];
   stages: StageResult[];
+  warnings?: string[];
+  failure_reason?: string | null;
 }
 
 export interface DesignFeedbackItem {
@@ -235,6 +241,9 @@ export interface BrandAssetsPageResponse {
     type: string;
     source: string;
     status: string;
+    trainingRole: string;
+    includeInTraining: boolean;
+    qualityLevel: string;
     size: number;
     createdAt?: string | null;
   }>;
@@ -250,6 +259,9 @@ export interface BrandAssetPreviewResponse {
   size: number;
   source: string;
   status: string;
+  trainingRole: string;
+  includeInTraining: boolean;
+  qualityLevel: string;
   savedPath: string;
   fileExists: boolean;
   previewType: "image" | "pdf" | "text" | "metadata" | "unknown";
@@ -315,6 +327,9 @@ export interface BrandRulesPageResponse {
     name: string;
     folder: string;
     status: string;
+    trainingRole: string;
+    includeInTraining: boolean;
+    qualityLevel: string;
   }>;
   websiteUrls: string[];
   emptyState: string;
@@ -400,6 +415,7 @@ export interface DesignTasksPageResponse {
   filters: { brand: string; status: string; taskType: string; search: string };
   metrics: { total: number; running: number; success: number; failed: number };
   tasks: Array<{
+    runId: string;
     taskId: string;
     brand: string;
     product: string;
@@ -408,6 +424,57 @@ export interface DesignTasksPageResponse {
     createdAt?: string | null;
     completedAt?: string | null;
   }>;
+}
+
+export interface WorkflowDetailResponse {
+  runId: string;
+  taskCode: string;
+  taskType: string;
+  status: string;
+  currentStage?: string | null;
+  projectName: string;
+  brandName: string;
+  productName: string;
+  workflowMode: string;
+  summary: string;
+  usedDeepagents: boolean;
+  agentReport: string;
+  requestPayload: Record<string, unknown>;
+  designSpec: Record<string, unknown>;
+  warnings: string[];
+  failureReason?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  stages: StageResult[];
+  logs: Array<{
+    scope: string;
+    title: string;
+    message: string;
+    payload?: unknown;
+    createdAt?: string | null;
+  }>;
+  assets: Array<{
+    name: string;
+    contentType?: string | null;
+    size: number;
+    savedPath?: string | null;
+    bucket: string;
+    extractedText?: string | null;
+  }>;
+  artifacts?: {
+    previewSvg: string;
+    designSpec: string;
+    photoshopJsx: string;
+    figmaPlugin?: string | null;
+    figmaUrl?: string | null;
+    exportStatus?: string | null;
+    exportMode?: string | null;
+    exportError?: string | null;
+    editableHtml?: string | null;
+    readme: string;
+    outputDir: string;
+  } | null;
+  feedback: DesignFeedbackItem[];
 }
 
 export async function fetchDefaults(): Promise<DefaultsResponse> {
@@ -703,6 +770,33 @@ export async function deleteBrandAsset(
   return response.json();
 }
 
+export async function updateBrandAssetTrainingMeta(input: {
+  assetId: number;
+  trainingRole: string;
+  includeInTraining: boolean;
+  qualityLevel: string;
+}): Promise<{
+  id: number;
+  trainingRole: string;
+  includeInTraining: boolean;
+  qualityLevel: string;
+}> {
+  const response = await fetch(`${API_BASE}/api/brand-assets/${input.assetId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      training_role: input.trainingRole,
+      include_in_training: input.includeInTraining,
+      quality_level: input.qualityLevel,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `更新资产训练信息失败：${response.status}`);
+  }
+  return response.json();
+}
+
 export function brandAssetFileUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
@@ -755,6 +849,12 @@ export async function fetchWorkflowLogs(
     throw new Error(text || `日志加载失败：${response.status}`);
   }
   return response.json();
+}
+
+export async function fetchWorkflowDetail(
+  runId: string,
+): Promise<WorkflowDetailResponse> {
+  return fetchJson(`/api/workflows/${runId}`);
 }
 
 export async function createWorkflowFeedback(input: {

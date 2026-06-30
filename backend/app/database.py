@@ -93,6 +93,9 @@ class BrandAsset(Base):
     saved_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(64), default="uploaded")
+    training_role: Mapped[str] = mapped_column(String(64), default="reference")
+    include_in_training: Mapped[bool] = mapped_column(Boolean, default=False)
+    quality_level: Mapped[str] = mapped_column(String(64), default="normal")
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -313,6 +316,10 @@ class WorkflowArtifact(Base):
     design_spec_path: Mapped[str] = mapped_column(String(1024))
     photoshop_jsx: Mapped[str] = mapped_column(String(1024))
     figma_plugin: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    figma_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    export_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    export_mode: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    export_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     editable_html: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     readme: Mapped[str] = mapped_column(String(1024))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -362,9 +369,46 @@ def _ensure_schema_upgrades() -> None:
             artifact_statements.append(
                 "ALTER TABLE workflow_artifacts ADD COLUMN editable_html VARCHAR(1024) NULL"
             )
+        if "figma_url" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN figma_url VARCHAR(2048) NULL"
+            )
+        if "export_status" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN export_status VARCHAR(64) NULL"
+            )
+        if "export_mode" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN export_mode VARCHAR(64) NULL"
+            )
+        if "export_error" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN export_error LONGTEXT NULL"
+            )
         if artifact_statements:
             with engine.begin() as connection:
                 for statement in artifact_statements:
+                    connection.execute(text(statement))
+    if "brand_assets" in table_names:
+        asset_existing = {
+            column["name"] for column in inspector.get_columns("brand_assets")
+        }
+        asset_statements: list[str] = []
+        if "training_role" not in asset_existing:
+            asset_statements.append(
+                "ALTER TABLE brand_assets ADD COLUMN training_role VARCHAR(64) NOT NULL DEFAULT 'reference'"
+            )
+        if "include_in_training" not in asset_existing:
+            asset_statements.append(
+                "ALTER TABLE brand_assets ADD COLUMN include_in_training BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        if "quality_level" not in asset_existing:
+            asset_statements.append(
+                "ALTER TABLE brand_assets ADD COLUMN quality_level VARCHAR(64) NOT NULL DEFAULT 'normal'"
+            )
+        if asset_statements:
+            with engine.begin() as connection:
+                for statement in asset_statements:
                     connection.execute(text(statement))
     if "brand_rules" not in table_names:
         return
@@ -556,6 +600,10 @@ def persist_run_completed(
                 design_spec_path=artifact_paths["design_spec"],
                 photoshop_jsx=artifact_paths["photoshop_jsx"],
                 figma_plugin=artifact_paths.get("figma_plugin"),
+                figma_url=artifact_paths.get("figma_url"),
+                export_status=artifact_paths.get("export_status"),
+                export_mode=artifact_paths.get("export_mode"),
+                export_error=artifact_paths.get("export_error"),
                 editable_html=artifact_paths.get("editable_html"),
                 readme=artifact_paths["readme"],
             )
@@ -601,6 +649,165 @@ def load_run_snapshot(run_id: str) -> dict[str, Any] | None:
             "current_stage": run.current_stage,
             "logs": logs,
             "stages": stages,
+            "warnings": run.warnings or [],
+            "failure_reason": _workflow_failure_reason(run.status, run.warnings or [], logs),
+        }
+
+
+def _workflow_failure_reason(status: str, warnings: list[str], logs: list[str]) -> str | None:
+    if status not in {"failed", "cancelled", "fallback_completed"} and not warnings:
+        return None
+    joined = "\n".join([*warnings, *logs]).lower()
+    if "api key" in joined or "model" in joined or "llm" in joined:
+        return "模型或密钥不可用"
+    if "asset" in joined or "素材" in joined or "image" in joined:
+        return "素材不足或图片处理失败"
+    if "rule" in joined or "品牌规则" in joined:
+        return "规则缺失或规则选择无效"
+    if "artifact" in joined or "export" in joined or "导出" in joined:
+        return "导出阶段失败"
+    if status == "cancelled":
+        return "任务被用户取消"
+    if status == "fallback_completed":
+        return "任务已降级完成，部分结果来自规则回退"
+    return "任务执行失败，请查看阶段日志"
+
+
+def _sanitize_request_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(payload or {})
+    model_config = data.get("model_config")
+    if isinstance(model_config, dict):
+        sanitized = dict(model_config)
+        if "api_key" in sanitized:
+            sanitized["api_key"] = ""
+        data["model_config"] = sanitized
+    model_settings = data.get("model_settings")
+    if isinstance(model_settings, dict):
+        sanitized = dict(model_settings)
+        if "api_key" in sanitized:
+            sanitized["api_key"] = ""
+        data["model_settings"] = sanitized
+    return data
+
+
+def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
+    with session_scope() as session:
+        if session is None:
+            return None
+        run = session.get(WorkflowRun, run_id)
+        if run is None:
+            return None
+        stages = [
+            {
+                "id": stage.stage_id,
+                "title": stage.title,
+                "icon": stage.icon,
+                "status": stage.status,
+                "summary": stage.summary,
+                "detail": stage.detail,
+                "data": stage.data or {},
+                "used_model": stage.used_model,
+                "elapsed_ms": stage.elapsed_ms,
+            }
+            for stage in session.execute(
+                select(WorkflowStage)
+                .where(WorkflowStage.run_id == run_id)
+                .order_by(WorkflowStage.id.asc())
+            ).scalars()
+        ]
+        logs = [
+            {
+                "scope": log.scope,
+                "title": log.title,
+                "message": log.message,
+                "payload": log.payload,
+                "createdAt": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in session.execute(
+                select(WorkflowLog)
+                .where(WorkflowLog.run_id == run_id)
+                .order_by(WorkflowLog.id.asc())
+            ).scalars()
+        ]
+        artifact = session.execute(
+            select(WorkflowArtifact)
+            .where(WorkflowArtifact.run_id == run_id)
+            .order_by(WorkflowArtifact.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        feedback = [
+            {
+                "id": row.id,
+                "runId": row.run_id,
+                "feedbackType": row.feedback_type,
+                "author": row.author,
+                "changes": row.changes or [],
+                "notes": row.notes,
+                "createdAt": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in session.execute(
+                select(DesignFeedback)
+                .where(DesignFeedback.run_id == run_id)
+                .order_by(DesignFeedback.created_at.desc(), DesignFeedback.id.desc())
+            ).scalars()
+        ]
+        assets = [
+            {
+                "name": asset.name,
+                "contentType": asset.content_type,
+                "size": asset.size,
+                "savedPath": asset.saved_path,
+                "bucket": asset.bucket,
+                "extractedText": asset.extracted_text,
+            }
+            for asset in session.execute(
+                select(WorkflowAsset)
+                .where(WorkflowAsset.run_id == run_id)
+                .order_by(WorkflowAsset.id.asc())
+            ).scalars()
+        ]
+        artifact_data = (
+            {
+                "previewSvg": artifact.preview_svg,
+                "designSpec": artifact.design_spec_path,
+                "photoshopJsx": artifact.photoshop_jsx,
+                "figmaPlugin": artifact.figma_plugin,
+                "figmaUrl": artifact.figma_url,
+                "exportStatus": artifact.export_status or ("completed" if artifact.figma_url else "fallback_script"),
+                "exportMode": artifact.export_mode or ("figma_url" if artifact.figma_url else "script"),
+                "exportError": artifact.export_error,
+                "editableHtml": artifact.editable_html,
+                "readme": artifact.readme,
+                "outputDir": artifact.output_dir,
+            }
+            if artifact
+            else None
+        )
+        log_messages = [item["message"] for item in logs]
+        return {
+            "runId": run.run_id,
+            "taskCode": run.task_code or run.run_id,
+            "taskType": run.task_type or "商品详情页",
+            "status": run.status,
+            "currentStage": run.current_stage,
+            "projectName": run.project_name or "",
+            "brandName": run.brand_name or "",
+            "productName": run.product_name or "",
+            "workflowMode": run.workflow_mode or "",
+            "summary": run.summary or "",
+            "usedDeepagents": run.used_deepagents,
+            "agentReport": run.agent_report or "",
+            "requestPayload": _sanitize_request_payload(run.request_payload),
+            "designSpec": run.design_spec or {},
+            "warnings": run.warnings or [],
+            "failureReason": _workflow_failure_reason(run.status, run.warnings or [], log_messages),
+            "createdAt": run.created_at.isoformat() if run.created_at else None,
+            "completedAt": run.completed_at.isoformat() if run.completed_at else None,
+            "stages": stages,
+            "logs": logs,
+            "assets": assets,
+            "artifacts": artifact_data,
+            "feedback": feedback,
         }
 
 
@@ -633,7 +840,16 @@ def get_workflow_stages_data() -> list[dict[str, Any]] | None:
         if session is None:
             return None
         value = _setting(session, "workflow_stages")
-        return value if isinstance(value, list) else None
+        if not isinstance(value, list):
+            return None
+        stage_ids = {str(item.get("id")) for item in value if isinstance(item, dict)}
+        if "image_generation" not in stage_ids:
+            value = [
+                *value[:4],
+                {"id": "image_generation", "title": "图片生成 Agent", "icon": "image"},
+                *value[4:],
+            ]
+        return value
 
 
 def get_dashboard_data() -> dict[str, Any] | None:
@@ -806,6 +1022,9 @@ def get_brand_assets_page_data(
                     "type": asset.content_type or "未知",
                     "source": asset.source or "未知来源",
                     "status": asset.status,
+                    "trainingRole": asset.training_role,
+                    "includeInTraining": asset.include_in_training,
+                    "qualityLevel": asset.quality_level,
                     "size": asset.size,
                     "createdAt": asset.created_at.isoformat() if asset.created_at else None,
                 }
@@ -918,6 +1137,9 @@ def create_brand_assets(
                 saved_path=file_item.get("saved_path"),
                 source=source or None,
                 status="待校验",
+                training_role="reference",
+                include_in_training=False,
+                quality_level="normal",
                 extracted_text=file_item.get("extracted_text"),
                 metadata_json={
                     "original_name": file_item.get("name"),
@@ -933,6 +1155,9 @@ def create_brand_assets(
                     "folder": row.folder,
                     "source": row.source,
                     "status": row.status,
+                    "trainingRole": row.training_role,
+                    "includeInTraining": row.include_in_training,
+                    "qualityLevel": row.quality_level,
                 }
             )
         return created
@@ -973,9 +1198,37 @@ def get_brand_asset(asset_id: int) -> dict[str, Any] | None:
             "savedPath": asset.saved_path or "",
             "source": asset.source or "",
             "status": asset.status,
+            "trainingRole": asset.training_role,
+            "includeInTraining": asset.include_in_training,
+            "qualityLevel": asset.quality_level,
             "extractedText": asset.extracted_text or "",
             "metadata": asset.metadata_json or {},
             "createdAt": asset.created_at.isoformat() if asset.created_at else None,
+        }
+
+
+def update_brand_asset_training_meta(
+    asset_id: int,
+    training_role: str,
+    include_in_training: bool,
+    quality_level: str,
+) -> dict[str, Any]:
+    with session_scope() as session:
+        if session is None:
+            raise ValueError("database disabled")
+        asset = session.get(BrandAsset, asset_id)
+        if asset is None:
+            raise ValueError("asset not found")
+        asset.training_role = training_role.strip() or "reference"
+        asset.include_in_training = bool(include_in_training)
+        asset.quality_level = quality_level.strip() or "normal"
+        asset.updated_at = datetime.utcnow()
+        session.merge(asset)
+        return {
+            "id": asset.id,
+            "trainingRole": asset.training_role,
+            "includeInTraining": asset.include_in_training,
+            "qualityLevel": asset.quality_level,
         }
 
 
@@ -1088,7 +1341,7 @@ def get_workflow_rule_context(
                     parent_versions[parent.id] = parent.version
             detail_payload = _serialize_workflow_rule(detail_rule, detail_brand, parent_versions)
             if selected_brand_id is not None and detail_brand.id != selected_brand_id:
-                raise ValueError("selected core rule and detail page rule belong to different brands")
+                raise ValueError("所选品牌核心规则与详情页规则不属于同一品牌，请重新选择同品牌的规则组合")
             selected_brand_id = detail_brand.id
             selected_brand_name = detail_brand.name
 
@@ -1131,6 +1384,9 @@ def get_brand_rules_page_data(
                 "name": asset.name,
                 "folder": asset.folder,
                 "status": asset.status,
+                "trainingRole": asset.training_role,
+                "includeInTraining": asset.include_in_training,
+                "qualityLevel": asset.quality_level,
             }
             for asset in session.execute(
                 select(BrandAsset)
@@ -1492,14 +1748,59 @@ def get_brand_rule_training_context(
         linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE, status="active")
         if linked_core_rule is None:
             linked_core_rule = _latest_rule_for_target(session, brand_id, RULE_TARGET_BRAND_CORE)
-        assets = list(
-            session.execute(
-                select(BrandAsset).where(
-                    BrandAsset.brand_id == brand_id,
-                    BrandAsset.id.in_(asset_ids),
-                )
-            ).scalars()
-        )
+        asset_query = select(BrandAsset).where(BrandAsset.brand_id == brand_id)
+        if asset_ids:
+            asset_query = asset_query.where(BrandAsset.id.in_(asset_ids))
+        else:
+            included_assets = list(
+                session.execute(
+                    asset_query.where(BrandAsset.include_in_training.is_(True))
+                ).scalars()
+            )
+            assets = included_assets or list(
+                session.execute(asset_query.order_by(BrandAsset.id.asc())).scalars()
+            )
+            return {
+                "brand": {"id": brand.id, "name": brand.name, "status": brand.status},
+                "trainingTarget": target_key,
+                "targetMeta": get_rule_target_meta(target_key),
+                "baseRule": {
+                    "id": base_rule.id,
+                    "version": base_rule.version,
+                    "markdown": base_rule.markdown or "",
+                    "designRules": base_rule.design_rules or [],
+                    "layoutRules": base_rule.layout_rules or [],
+                    "components": base_rule.components or [],
+                    "targetKey": get_default_rule_target(base_rule),
+                }
+                if base_rule
+                else None,
+                "linkedCoreRule": {
+                    "id": linked_core_rule.id,
+                    "version": linked_core_rule.version,
+                    "markdown": linked_core_rule.markdown or "",
+                }
+                if linked_core_rule
+                else None,
+                "assets": [
+                    {
+                        "id": asset.id,
+                        "name": asset.name,
+                        "folder": asset.folder,
+                        "contentType": asset.content_type or "",
+                        "source": asset.source or "",
+                        "size": asset.size,
+                        "savedPath": asset.saved_path or "",
+                        "extractedText": asset.extracted_text or "",
+                        "trainingRole": asset.training_role,
+                        "includeInTraining": asset.include_in_training,
+                        "qualityLevel": asset.quality_level,
+                        "metadata": asset.metadata_json or {},
+                    }
+                    for asset in assets
+                ],
+            }
+        assets = list(session.execute(asset_query).scalars())
         return {
             "brand": {"id": brand.id, "name": brand.name, "status": brand.status},
             "trainingTarget": target_key,
@@ -1532,6 +1833,9 @@ def get_brand_rule_training_context(
                     "size": asset.size,
                     "savedPath": asset.saved_path or "",
                     "extractedText": asset.extracted_text or "",
+                    "trainingRole": asset.training_role,
+                    "includeInTraining": asset.include_in_training,
+                    "qualityLevel": asset.quality_level,
                     "metadata": asset.metadata_json or {},
                 }
                 for asset in assets
@@ -2067,6 +2371,7 @@ def get_design_tasks_page_data(
             },
             "tasks": [
                 {
+                    "runId": item.run_id,
                     "taskId": item.task_code or item.run_id,
                     "brand": item.brand_name or "",
                     "product": item.product_name or "",
@@ -2085,6 +2390,7 @@ DEFAULT_WORKFLOW_STAGES: list[dict[str, Any]] = [
     {"id": "product_brief", "title": "Product Brief", "icon": "layers"},
     {"id": "brand_knowledge", "title": "品牌知识库 / 规则版本", "icon": "library"},
     {"id": "page_planner", "title": "页面规划 Agent", "icon": "palette"},
+    {"id": "image_generation", "title": "图片生成 Agent", "icon": "image"},
     {"id": "layout_engine", "title": "Layout Engine", "icon": "grid"},
     {"id": "copy", "title": "文案 Agent", "icon": "type"},
     {"id": "figma_psd", "title": "Figma / PSD 生成 Agent", "icon": "file-image"},

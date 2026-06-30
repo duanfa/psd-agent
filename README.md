@@ -4,7 +4,7 @@
 
 ```
 品牌资产 → 品牌知识库 → 规则版本 → Product Brief → 页面规划
-      → Layout Engine → Figma / PSD → Design Score → 人工反馈
+      → 图片生成 → Layout Engine → Figma / PSD → Design Score → 人工反馈
 ```
 
 - 前端：Next.js 单页 BrandOS 控制台，顶部为工作流节点和 BrandOS 核心概览，左侧分组配置，右侧阶段时间线 + 预览 + 下载。
@@ -23,6 +23,7 @@
 | Product Brief | 合并视觉信息与商品资料 | structured_info |
 | 品牌知识库 / 规则版本 | 输出 Core Rule / Derived Rule / Asset Memory、权重、版本状态和漂移风险 | brand_profile |
 | 页面规划 Agent | 在标准模块模板内生成页面信息架构与图片策略 | design_direction |
+| 图片生成 Agent | 为模块规划配图，优先输出真实 Figma 交付所需图片资产，缺省时回退生成占位图 | generated_images |
 | Layout Engine | 拆分模块、定义布局与图层结构 | modules |
 | 文案 Agent | 逐模块生成标题/副标题/说明/要点 | copy |
 | Figma / PSD 生成 Agent | 输出 Figma Frame / PSD 图层树与命名规范 | psd_layers |
@@ -31,7 +32,7 @@
 
 ## 配置文件
 
-- `config/workflow-defaults.json`：项目默认参数（默认输出详情页结构化方案、Figma 页面与 PSD 兼容文件）。
+- `config/workflow-defaults.json`：项目默认参数（默认输出详情页结构化方案、真实 Figma 交付入口或 Figma 脚本 fallback，以及 PSD 兼容文件）。
 - `config/workflow-defaults.local.json`：本地覆盖（可选，放私有 key、自定义模型）。
 
 合并顺序：内置默认 → `workflow-defaults.json` → `workflow-defaults.local.json` → 请求体。
@@ -65,10 +66,14 @@ NEXT_PUBLIC_PSD_AGENT_API_BASE=http://localhost:8000 pnpm dev
 
 每次生成写入 `backend/runs/<run_id>/outputs`：
 
-- `design_spec.json`：完整结构（品牌规则分层 + 页面结构 + 模块文案 + Figma/PSD 图层树 + 设计评分 + 审核清单）。
+- `design_spec.json`：完整结构（品牌规则分层 + 页面结构 + 模块文案 + 模块配图 + Figma/PSD 图层树 + 设计评分 + 审核清单）。
 - `preview.svg`：由真实文案/版式驱动的详情页预览图。
+- `assets/`：原始上传图片与图片生成阶段输出的占位图/派生图，供预览与导出消费。
 - `create_detail_page.jsx`：PSD 兼容脚本，生成可编辑文字层与图层分组初稿。
+- `create_figma_page.ts`：Figma 插件脚本 fallback；若配置真实 Figma 导出适配器，则前端优先展示真实 Figma 页面入口。
+- `editable_detail_page.html`：浏览器可编辑审稿稿，适合设计师初审与反馈记录。
 - `README.md`：导出包说明。
 
-当前为 BrandOS MVP 初稿链路：AI 负责品牌规则消费、页面结构、文案、版式和设计稿结构规划；
+当前为 BrandOS MVP 初稿链路：AI 负责品牌规则消费、页面结构、模块配图规划、文案、版式和设计稿结构规划。
+当前版本中的 Figma 交付支持两种模式：优先展示真实 Figma 页面入口；若未配置真实导出适配器，则自动回退为 Figma 插件脚本。
 高清素材替换、抠图调色与最终审稿仍由设计师完成。设计师修改会作为反馈数据记录，不会自动覆盖品牌核心规则。

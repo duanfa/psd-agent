@@ -897,6 +897,16 @@ button {
   font-weight: 900;
 }
 
+.table-link {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.table-link:hover {
+  text-decoration: underline;
+}
+
 .rule-table .rule-description-cell {
   min-width: 420px;
   white-space: normal;
@@ -2347,6 +2357,17 @@ button {
   padding: 12px;
 }
 
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.detail-metric {
+  font-size: 18px;
+  line-height: 1.5;
+}
+
 .log-card .card-label {
   display: flex;
   align-items: center;
@@ -2744,6 +2765,9 @@ button {
     max-height: none;
   }
   .result-grid {
+    grid-template-columns: 1fr;
+  }
+  .detail-grid {
     grid-template-columns: 1fr;
   }
   .hero {

@@ -47,6 +47,7 @@ const FALLBACK_STAGES: StageMeta[] = [
   { id: "product_brief", title: "Product Brief", icon: "layers" },
   { id: "brand_knowledge", title: "品牌知识库 / 规则版本", icon: "library" },
   { id: "page_planner", title: "页面规划 Agent", icon: "palette" },
+  { id: "image_generation", title: "图片生成 Agent", icon: "image" },
   { id: "layout_engine", title: "Layout Engine", icon: "grid" },
   { id: "copy", title: "文案 Agent", icon: "type" },
   { id: "figma_psd", title: "Figma / PSD 生成 Agent", icon: "file-image" },
@@ -155,6 +156,7 @@ export function PsdWorkflowApp() {
   const [liveStages, setLiveStages] = useState<WorkflowResult["stages"]>([]);
   const [workflowLogs, setWorkflowLogs] = useState<string[]>([]);
   const [workflowLogStatus, setWorkflowLogStatus] = useState<string>("idle");
+  const [workflowFailureReason, setWorkflowFailureReason] = useState<string | null>(null);
   const [brandRules, setBrandRules] = useState<BrandRuleOption[]>([]);
   const [brandRulesLoading, setBrandRulesLoading] = useState(false);
   const [brandRulesError, setBrandRulesError] = useState<string | null>(null);
@@ -260,6 +262,18 @@ export function PsdWorkflowApp() {
       ),
     [brandRules, selectedCoreRule, selectedCoreRuleId],
   );
+
+  useEffect(() => {
+    if (selectedDetailPageRuleId === "") return;
+    const detailRule = brandRules.find((rule) => rule.id === selectedDetailPageRuleId);
+    if (!detailRule || detailRule.targetKey !== "detail_page_layout") {
+      setSelectedDetailPageRuleId("");
+      return;
+    }
+    if (selectedCoreRule && detailRule.brandId !== selectedCoreRule.brandId) {
+      setSelectedDetailPageRuleId("");
+    }
+  }, [brandRules, selectedCoreRule, selectedDetailPageRuleId]);
 
   useEffect(() => {
     if (!currentRunId) return;
@@ -383,6 +397,8 @@ export function PsdWorkflowApp() {
     setLiveStages([]);
     setWorkflowLogs([]);
     setWorkflowLogStatus("running");
+    setWorkflowFailureReason(null);
+    setFeedbackItems([]);
     setLoading(true);
     setCancelling(false);
     setError(null);
@@ -400,6 +416,7 @@ export function PsdWorkflowApp() {
       setWorkflowLogs(snapshot.logs);
       setLiveStages(snapshot.stages);
       setWorkflowLogStatus(snapshot.status);
+      setWorkflowFailureReason(snapshot.failure_reason ?? null);
       setCurrentStageId(snapshot.current_stage ?? null);
       const feedback = await fetchWorkflowFeedback(runId);
       setFeedbackItems(feedback.items);
@@ -409,6 +426,7 @@ export function PsdWorkflowApp() {
         setWorkflowLogs(snapshot.logs);
         setLiveStages(snapshot.stages);
         setWorkflowLogStatus(snapshot.status);
+        setWorkflowFailureReason(snapshot.failure_reason ?? null);
         setCurrentStageId(snapshot.current_stage ?? null);
       } catch {
         // ignore
@@ -1091,7 +1109,7 @@ export function PsdWorkflowApp() {
             {loading ? (
               <div className="placeholder">
                 <Loader2 className="spin" size={28} />
-                <p>正在依次执行商品理解 → 品牌知识库 → 页面规划 → Layout → Figma/PSD → 评分反馈…</p>
+                <p>正在依次执行商品理解 → 品牌知识库 → 页面规划 → 图片生成 → Layout → Figma/PSD → 评分反馈…</p>
               </div>
             ) : null}
 
@@ -1119,6 +1137,14 @@ export function PsdWorkflowApp() {
             {result ? (
               <div className="result">
                 <p className="result-summary">{result.summary}</p>
+                {workflowFailureReason ? <div className="error">故障分类：{workflowFailureReason}</div> : null}
+                {result.artifacts.export_status ? (
+                  <p className="hint">
+                    导出状态：{result.artifacts.export_status}
+                    {result.artifacts.export_mode ? ` / ${result.artifacts.export_mode}` : ""}
+                    {result.artifacts.export_error ? ` / ${result.artifacts.export_error}` : ""}
+                  </p>
+                ) : null}
 
                 <div className="downloads">
                   <a
@@ -1145,14 +1171,25 @@ export function PsdWorkflowApp() {
                   >
                     <Download size={14} /> PSD 兼容 JSX
                   </a>
-                  <a
-                    className="download"
-                    href={artifactUrl(result.run_id, "create_figma_page.ts")}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    <Download size={14} /> Figma 插件 TS
-                  </a>
+                  {result.artifacts.figma_url ? (
+                    <a
+                      className="download"
+                      href={result.artifacts.figma_url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <Download size={14} /> 打开 Figma 页面
+                    </a>
+                  ) : (
+                    <a
+                      className="download"
+                      href={artifactUrl(result.run_id, "create_figma_page.ts")}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <Download size={14} /> Figma 插件 TS
+                    </a>
+                  )}
                   <a
                     className="download"
                     href={artifactUrl(result.run_id, "editable_detail_page.html")}
@@ -1168,6 +1205,9 @@ export function PsdWorkflowApp() {
                     target="_blank"
                   >
                     <FileText size={14} /> README
+                  </a>
+                  <a className="download" href={`/design-tasks/${result.run_id}`}>
+                    <BookOpen size={14} /> 任务详情
                   </a>
                 </div>
 

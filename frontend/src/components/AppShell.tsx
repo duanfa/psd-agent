@@ -29,7 +29,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="nav-section-title">业务端</div>
         <nav className="nav-list" aria-label="业务端导航">
           {NAV_ITEMS.map((item) => {
-            const active = pathname === item.href || item.aliases?.includes(pathname);
+            const active =
+              pathname === item.href ||
+              item.aliases?.includes(pathname) ||
+              (item.href !== "/" && pathname.startsWith(`${item.href}/`));
             return (
               <Link
                 className={`nav-link ${active ? "active" : ""}`}

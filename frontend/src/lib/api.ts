@@ -126,6 +126,8 @@ export interface WorkflowResult {
     preview_svg: string;
     design_spec: string;
     photoshop_jsx: string;
+    figma_plugin: string;
+    editable_html: string;
     readme: string;
   };
   assets: Array<{
@@ -153,6 +155,16 @@ export interface WorkflowLogsResponse {
   current_stage?: string | null;
   logs: string[];
   stages: StageResult[];
+}
+
+export interface DesignFeedbackItem {
+  id: number;
+  runId: string;
+  feedbackType: string;
+  author: string;
+  changes: Array<Record<string, unknown>>;
+  notes: string;
+  createdAt?: string | null;
 }
 
 export const API_BASE =
@@ -264,6 +276,19 @@ export interface BrandRuleOption {
   markdown: string;
   updatedAt?: string | null;
   label: string;
+}
+
+export interface BrandRuleDiffResponse {
+  base: { id: number; version: string; status: string };
+  compare: { id: number; version: string; status: string };
+  diff: Record<
+    string,
+    {
+      added: Array<{ title: string; description: string }>;
+      removed: Array<{ title: string; description: string }>;
+      changed: Array<{ title: string; from: string; to: string }>;
+    }
+  >;
 }
 
 export interface ProductsPageResponse {
@@ -460,6 +485,43 @@ export async function updateBrandRuleMarkdown(
   return response.json();
 }
 
+export async function publishBrandRule(
+  ruleId: number,
+): Promise<{ id: number; version: string; status: string }> {
+  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}/publish`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `发布版本失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function rollbackBrandRule(
+  ruleId: number,
+): Promise<{ id: number; version: string; status: string }> {
+  const response = await fetch(`${API_BASE}/api/brand-rules/${ruleId}/rollback`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `回滚版本失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchBrandRuleDiff(
+  baseRuleId: number,
+  compareRuleId: number,
+): Promise<BrandRuleDiffResponse> {
+  const params = new URLSearchParams({
+    base_rule_id: String(baseRuleId),
+    compare_rule_id: String(compareRuleId),
+  });
+  return fetchJson(`/api/brand-rules/diff?${params.toString()}`);
+}
+
 export async function fetchProductsPage(): Promise<ProductsPageResponse> {
   return fetchJson("/api/pages/products");
 }
@@ -568,6 +630,36 @@ export async function fetchWorkflowLogs(runId: string): Promise<WorkflowLogsResp
     throw new Error(text || `日志加载失败：${response.status}`);
   }
   return response.json();
+}
+
+export async function createWorkflowFeedback(input: {
+  runId: string;
+  feedbackType: string;
+  author: string;
+  changes: Array<Record<string, unknown>>;
+  notes: string;
+}): Promise<DesignFeedbackItem> {
+  const response = await fetch(`${API_BASE}/api/workflows/${input.runId}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      feedback_type: input.feedbackType,
+      author: input.author,
+      changes: input.changes,
+      notes: input.notes,
+    }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `保存反馈失败：${response.status}`);
+  }
+  return response.json();
+}
+
+export async function fetchWorkflowFeedback(
+  runId: string,
+): Promise<{ items: DesignFeedbackItem[] }> {
+  return fetchJson(`/api/workflows/${runId}/feedback`);
 }
 
 export function artifactUrl(runId: string, name: string): string {

@@ -699,14 +699,17 @@ button {
 
 .rules-layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 20px;
   align-items: start;
   margin-top: 18px;
 }
 
 .rules-main {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .section-hero-title {
@@ -817,7 +820,7 @@ button {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  margin-top: 18px;
+  margin-top: 0;
 }
 
 .record-list {
@@ -904,6 +907,165 @@ button {
   white-space: nowrap;
 }
 
+.brand-rule-table td {
+  vertical-align: middle;
+}
+
+.brand-rule-table tbody tr {
+  transition: background 0.16s ease;
+}
+
+.brand-rule-table tbody tr:hover {
+  background: #fbfcff;
+}
+
+.brand-rule-version-cell strong {
+  display: block;
+  font-size: 14px;
+}
+
+.brand-rule-version-cell .subtitle {
+  display: block;
+  margin-top: 4px;
+}
+
+.brand-rule-counts-cell {
+  white-space: normal !important;
+}
+
+.brand-rule-counts-cell span {
+  display: inline-flex;
+  margin: 3px 6px 3px 0;
+  border-radius: 999px;
+  background: #f8fafc;
+  padding: 4px 10px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.brand-rule-workspace-grid {
+  margin-top: 0;
+}
+
+.rule-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rule-action-btn {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.brand-rule-brand-panel {
+  position: sticky;
+  top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: calc(100vh - 72px);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.94)),
+    #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.08);
+}
+
+.brand-rule-brand-panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.brand-rule-brand-highlight {
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.18), transparent 36%),
+    linear-gradient(180deg, #eef2ff, #f8faff);
+  padding: 16px;
+}
+
+.brand-rule-brand-highlight-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-rule-brand-highlight-head strong {
+  display: block;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.brand-rule-brand-highlight-head span:not(.status-pill) {
+  display: block;
+  margin-top: 6px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.brand-rule-brand-highlight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.brand-rule-brand-highlight-grid div {
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 12px;
+}
+
+.brand-rule-brand-highlight-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brand-rule-brand-highlight-grid strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.brand-rule-brand-list {
+  flex: 1;
+  min-height: 220px;
+  padding-right: 2px;
+  overflow: auto;
+}
+
+.brand-rule-brand-list .assets-brand-item {
+  min-height: 72px;
+  border-radius: 16px;
+  border: 1px solid transparent;
+  background: rgba(248, 250, 252, 0.78);
+}
+
+.brand-rule-brand-list .assets-brand-item:hover,
+.brand-rule-brand-list .assets-brand-item.active {
+  border-color: rgba(99, 102, 241, 0.18);
+  background: linear-gradient(180deg, #fff, #eef2ff);
+}
+
+.brand-rule-brand-footnote {
+  border-top: 1px dashed var(--border);
+  padding-top: 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
 .toolbar-row {
   display: grid;
   grid-template-columns: 180px 180px minmax(0, 1fr);
@@ -951,6 +1113,80 @@ button {
   resize: vertical;
 }
 
+.brand-rule-side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: sticky;
+  top: 18px;
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96)),
+    #fff;
+}
+
+.brand-rule-side-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand-rule-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.brand-rule-meta-card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  padding: 12px;
+}
+
+.brand-rule-meta-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brand-rule-meta-card strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.brand-rule-action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.brand-rule-action-wide {
+  justify-content: center;
+  width: 100%;
+}
+
+.brand-rule-side-note {
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #eff6ff, #f8fbff);
+  padding: 14px;
+  color: #1e3a8a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.brand-rule-diff-panel {
+  margin-top: 0;
+}
+
+.brand-rule-inline-diff {
+  margin-top: 16px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -981,6 +1217,181 @@ button {
   background: #fff;
   box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
   padding: 20px;
+}
+
+.brand-rule-dialog {
+  position: fixed;
+  inset: 24px;
+  width: min(1180px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin: auto;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: #fff;
+  box-shadow: 0 28px 80px rgba(15, 23, 42, 0.28);
+  padding: 0;
+}
+
+.brand-rule-dialog::backdrop {
+  background: transparent;
+}
+
+.brand-rule-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 22px 22px 0;
+}
+
+.brand-rule-dialog-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px 22px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.brand-rule-dialog-actions {
+  justify-content: flex-end;
+}
+
+.brand-rule-dialog-meta span:not(.status-pill) {
+  border-radius: 999px;
+  background: #f8fafc;
+  padding: 6px 10px;
+}
+
+.brand-rule-dialog-body {
+  flex: 1;
+  min-height: 0;
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+.brand-rule-dialog-body.edit-mode {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+  min-height: 0;
+}
+
+.brand-rule-dialog-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand-rule-dialog-pane + .brand-rule-dialog-pane {
+  border-left: 1px solid var(--border);
+}
+
+.brand-rule-dialog-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 0;
+}
+
+.brand-rule-editor-dialog {
+  flex: 1;
+  min-height: 0;
+  margin: 16px 18px 18px;
+  resize: none;
+}
+
+.brand-rule-markdown-preview {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px;
+}
+
+.brand-rule-preview-pane .brand-rule-markdown-preview,
+.brand-rule-dialog-preview-pane .brand-rule-markdown-preview {
+  padding-top: 16px;
+}
+
+.brand-rule-markdown-preview-single {
+  max-height: calc(100vh - 220px);
+  min-height: auto;
+}
+
+.brand-rule-markdown-preview > :first-child {
+  margin-top: 0;
+}
+
+.brand-rule-markdown-preview h1,
+.brand-rule-markdown-preview h2,
+.brand-rule-markdown-preview h3,
+.brand-rule-markdown-preview h4 {
+  margin: 1.35em 0 0.6em;
+  line-height: 1.25;
+}
+
+.brand-rule-markdown-preview p,
+.brand-rule-markdown-preview li {
+  color: #334155;
+  line-height: 1.75;
+}
+
+.brand-rule-markdown-preview ul,
+.brand-rule-markdown-preview ol {
+  padding-left: 1.25rem;
+}
+
+.brand-rule-markdown-preview blockquote {
+  margin: 14px 0;
+  border-left: 4px solid #cbd5e1;
+  border-radius: 0 12px 12px 0;
+  background: #fff;
+  padding: 12px 14px;
+  color: #475569;
+}
+
+.brand-rule-markdown-preview code {
+  border-radius: 6px;
+  background: #e2e8f0;
+  padding: 0.15em 0.35em;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+}
+
+.brand-rule-markdown-preview pre {
+  overflow: auto;
+  border-radius: 14px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 16px;
+}
+
+.brand-rule-markdown-preview pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.brand-rule-markdown-preview table {
+  width: 100%;
+  margin: 16px 0;
+  border-collapse: collapse;
+  background: #fff;
+}
+
+.brand-rule-markdown-preview th,
+.brand-rule-markdown-preview td {
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
 }
 
 .asset-preview-meta {
@@ -2308,6 +2719,13 @@ button {
   .content-grid-sidebar {
     grid-template-columns: 1fr;
   }
+  .brand-rule-dialog-body.edit-mode {
+    grid-template-columns: 1fr;
+  }
+  .brand-rule-dialog-pane + .brand-rule-dialog-pane {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
   .assets-layout {
     grid-template-columns: 240px minmax(0, 1fr);
   }
@@ -2372,6 +2790,16 @@ button {
   .summary-grid {
     grid-template-columns: 1fr;
   }
+  .brand-rule-meta-grid {
+    grid-template-columns: 1fr;
+  }
+  .brand-rule-brand-panel {
+    position: static;
+    min-height: auto;
+  }
+  .brand-rule-brand-highlight-grid {
+    grid-template-columns: 1fr 1fr;
+  }
   .assets-folder-grid {
     grid-template-columns: 1fr;
   }
@@ -2392,6 +2820,13 @@ button {
   .action-grid {
     grid-template-columns: 1fr;
   }
+  .rule-action-group,
+  .brand-rule-dialog-header,
+  .brand-rule-side-header,
+  .brand-rule-brand-highlight-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
   .grid-2 {
     grid-template-columns: 1fr;
   }
@@ -2408,5 +2843,21 @@ button {
   .tab-switch-button {
     flex: 1;
     justify-content: center;
+  }
+  .brand-rule-dialog {
+    inset: 12px;
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+  .brand-rule-dialog-meta,
+  .brand-rule-markdown-preview {
+    padding: 16px;
+  }
+  .brand-rule-editor-dialog {
+    min-height: 280px;
+    margin: 12px 16px 16px;
+  }
+  .brand-rule-brand-highlight-grid {
+    grid-template-columns: 1fr;
   }
 }

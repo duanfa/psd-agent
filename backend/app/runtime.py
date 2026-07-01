@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from collections.abc import Mapping
 from datetime import date, datetime
@@ -47,6 +48,25 @@ def sanitize_for_log(value: Any) -> Any:
     return str(value)
 
 
+def _safe_console_print(message: str) -> None:
+    try:
+        print(message, flush=True)
+        return
+    except UnicodeEncodeError:
+        pass
+
+    stream = sys.stdout
+    text = f"{message}\n"
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    buffer = getattr(stream, "buffer", None)
+    if buffer is not None:
+        buffer.write(text.encode(encoding, errors="replace"))
+        buffer.flush()
+        return
+    stream.write(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
+    stream.flush()
+
+
 def append_log(run_id: str, scope: str, title: str, payload: Any | None = None) -> None:
     if isinstance(payload, str):
         body = payload
@@ -58,7 +78,7 @@ def append_log(run_id: str, scope: str, title: str, payload: Any | None = None) 
     timestamp = time.strftime("%H:%M:%S")
     header = f"[{timestamp}][{scope}] {title}"
     line = f"{header}\n{body}" if body else header
-    print(line, flush=True)
+    _safe_console_print(line)
 
     logs = RUN_LOGS.setdefault(run_id, [])
     logs.append(line)
@@ -67,7 +87,7 @@ def append_log(run_id: str, scope: str, title: str, payload: Any | None = None) 
     try:
         database.persist_log(run_id, scope, title, line, sanitize_for_log(payload))
     except Exception as exc:
-        print(f"[DB] persist_log failed: {exc}", flush=True)
+        _safe_console_print(f"[DB] persist_log failed: {exc}")
 
 
 def set_run_state(
@@ -92,7 +112,7 @@ def set_run_state(
             current_stage_icon,
         )
     except Exception as exc:
-        print(f"[DB] persist_run_state failed: {exc}", flush=True)
+        _safe_console_print(f"[DB] persist_run_state failed: {exc}")
 
 
 def append_stage_result(run_id: str, stage: Any) -> None:
@@ -109,7 +129,7 @@ def append_stage_result(run_id: str, stage: Any) -> None:
     try:
         database.persist_stage(run_id, data)
     except Exception as exc:
-        print(f"[DB] persist_stage failed: {exc}", flush=True)
+        _safe_console_print(f"[DB] persist_stage failed: {exc}")
 
 
 def get_run_snapshot(run_id: str) -> dict[str, Any]:
@@ -121,7 +141,7 @@ def get_run_snapshot(run_id: str) -> dict[str, Any]:
             if persisted:
                 return persisted
         except Exception as exc:
-            print(f"[DB] load_run_snapshot failed: {exc}", flush=True)
+            _safe_console_print(f"[DB] load_run_snapshot failed: {exc}")
     current_stage = state.get("current_stage")
     if state.get("status") == "running" and current_stage:
         if not any(stage.get("id") == current_stage for stage in stages):
@@ -136,6 +156,11 @@ def get_run_snapshot(run_id: str) -> dict[str, Any]:
                     "data": {},
                     "used_model": False,
                     "elapsed_ms": 0,
+                    "started_at": None,
+                    "completed_at": None,
+                    "duration_ms": 0,
+                    "error_code": "",
+                    "retry": {},
                 }
             )
     return {

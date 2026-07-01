@@ -168,6 +168,9 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
         "design_score": ctx.design_score,
         "layout_validation": ctx.layout_validation,
         "asset_match_report": ctx.asset_match_report,
+        "asset_guard": ctx.asset_guard,
+        "result_state": ctx.result_state,
+        "export_review": ctx.outputs.get("export_review", {}),
         "intermediate_preview": {
             "product_brief": ctx.structured_info,
             "selected_rules": {
@@ -180,7 +183,9 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
             "image_slot_count": sum(len(m.get("image_slots") or []) for m in modules),
             "text_layer_count": sum(len(m.get("text_layers") or []) for m in modules),
             "asset_match_status": ctx.asset_match_report.get("status"),
+            "asset_guard_status": ctx.asset_guard.get("status"),
             "layout_validation_status": ctx.layout_validation.get("status"),
+            "result_tier": ctx.result_state.get("tier"),
         },
         "outputs": ctx.outputs,
         "review_checklist": ctx.outputs.get("review_checklist", []),
@@ -269,6 +274,13 @@ def _resolve_module_images(
             continue
 
         chosen: str | None = None
+        for slot in module.get("image_slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            matched_asset = str(slot.get("matched_asset") or "").strip()
+            if matched_asset in rel_paths:
+                chosen = rel_paths[matched_asset]
+                break
         for candidate in module.get("image_candidates") or []:
             if candidate in rel_paths:
                 chosen = rel_paths[candidate]
@@ -282,6 +294,10 @@ def _resolve_module_images(
             for slot_index, slot in enumerate(module.get("image_slots") or []):
                 if not isinstance(slot, dict):
                     continue
+                matched_asset = str(slot.get("matched_asset") or "").strip()
+                if matched_asset in rel_paths:
+                    slot["image_file"] = rel_paths[matched_asset]
+                    continue
                 slot_role = str(slot.get("role") or module.get("role") or "")
                 preferred = [
                     name
@@ -294,15 +310,17 @@ def _resolve_module_images(
 
 def _asset_role_from_name(name: str) -> str:
     lower = name.lower()
+    if any(token in lower for token in ("hero", "主视觉", "头图", "banner", "kv")):
+        return "hero"
     if any(token in lower for token in ("人气", "recommend", "panenka", "campo", "conder", "kids", "v90")):
         return "recommendation"
-    if any(token in lower for token in ("model", "routine", "moves", "小红书", "lifestyle", "场景", "搭配")):
+    if any(token in lower for token in ("scenario", "model", "routine", "moves", "小红书", "lifestyle", "场景", "搭配")):
         return "lifestyle"
-    if any(token in lower for token in ("size", "尺码", "参数")):
+    if any(token in lower for token in ("parameter", "size", "尺码", "参数")):
         return "size"
     if any(token in lower for token in ("brand", "story", "logo")):
         return "brand_story"
-    if any(token in lower for token in ("volley", "packshot", "product", "产品")):
+    if any(token in lower for token in ("product_gallery", "volley", "packshot", "product", "产品")):
         return "product_gallery"
     return "detail"
 
@@ -928,9 +946,72 @@ def render_readme(spec: dict[str, Any]) -> str:
     ).strip()
 
 
+def _artifact_status_payload(spec: dict[str, Any]) -> dict[str, Any]:
+    result_state = (
+        spec.get("result_state") if isinstance(spec.get("result_state"), dict) else {}
+    )
+    export_preflight = (
+        result_state.get("export_preflight")
+        if isinstance(result_state.get("export_preflight"), dict)
+        else {}
+    )
+    export_review = (
+        spec.get("export_review") if isinstance(spec.get("export_review"), dict) else {}
+    )
+    return {
+        "result_tier": str(result_state.get("tier") or ""),
+        "tier_code": str(result_state.get("tier_code") or ""),
+        "delivery_status": str(result_state.get("delivery_status") or ""),
+        "error_code": str(result_state.get("error_code") or ""),
+        "reason_codes": [str(item) for item in result_state.get("reason_codes") or []],
+        "warning_codes": [str(item) for item in result_state.get("warning_codes") or []],
+        "export_preflight": export_preflight,
+        "export_review": export_review,
+        "result_state": result_state,
+    }
+
+
+def _artifact_output_metadata(
+    spec: dict[str, Any],
+    ctx: PipelineContext,
+    files: dict[str, Path],
+    export_payload: dict[str, Any],
+) -> dict[str, Any]:
+    result_payload = _artifact_status_payload(spec)
+    result_state = (
+        result_payload.get("result_state")
+        if isinstance(result_payload.get("result_state"), dict)
+        else {}
+    )
+    return {
+        "run_id": ctx.run_id,
+        "project": {
+            "name": spec.get("project", {}).get("name"),
+            "brand": spec.get("project", {}).get("brand"),
+            "product": spec.get("project", {}).get("product"),
+        },
+        "artifacts": {
+            "preview_svg": files["preview_svg"].name,
+            "design_spec": files["design_spec"].name,
+            "photoshop_jsx": files["photoshop_jsx"].name,
+            "figma_plugin": files["figma_plugin"].name,
+            "editable_html": files["editable_html"].name,
+            "readme": files["readme"].name,
+        },
+        "export": {
+            **export_payload,
+            "decision": str(result_state.get("delivery_status") or ""),
+            "error_code": result_payload.get("error_code") or "",
+            "reason_codes": list(result_payload.get("reason_codes") or []),
+            "warning_codes": list(result_payload.get("warning_codes") or []),
+        },
+        "result": result_payload,
+    }
+
+
 def write_artifacts(
     output_dir: Path, spec: dict[str, Any], ctx: PipelineContext
-) -> dict[str, str]:
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rel_paths = _copy_assets_to_output(output_dir, ctx)
     rel_paths.update(_write_generated_assets(output_dir, ctx))
@@ -942,6 +1023,7 @@ def write_artifacts(
         "figma_plugin": output_dir / "create_figma_page.ts",
         "editable_html": output_dir / "editable_detail_page.html",
         "readme": output_dir / "README.md",
+        "output_metadata": output_dir / "output_metadata.json",
     }
     files["preview_svg"].write_text(
         render_preview_svg(spec, output_dir), encoding="utf-8"
@@ -954,11 +1036,25 @@ def write_artifacts(
     files["editable_html"].write_text(render_editable_html(spec), encoding="utf-8")
     files["readme"].write_text(render_readme(spec), encoding="utf-8")
     template = os.getenv("BRANDOS_FIGMA_URL_TEMPLATE", "").strip()
+    result_state = spec.get("result_state") if isinstance(spec.get("result_state"), dict) else {}
+    delivery_status = str(result_state.get("delivery_status") or "review_only")
+    reason_text = "；".join(
+        [str(item).strip() for item in result_state.get("reasons", []) if str(item).strip()]
+    )
     figma_url = ""
-    export_status = "fallback_script"
-    export_mode = "script"
-    export_error = "未配置真实 Figma 导出适配器，已回退为脚本导出。"
-    if template:
+    if delivery_status == "blocked":
+        export_status = "blocked_review_bundle"
+        export_mode = "review_bundle"
+        export_error = reason_text or "Layout / Asset Guard 未通过，当前仅输出审稿与诊断产物。"
+    elif delivery_status == "review_only":
+        export_status = "review_only_bundle"
+        export_mode = "script_bundle"
+        export_error = reason_text or "当前结果为低保真草稿，仅建议输出脚本与审稿包。"
+    else:
+        export_status = "script_ready"
+        export_mode = "script_bundle"
+        export_error = "未配置真实 Figma 导出适配器，已回退为脚本导出。"
+    if template and delivery_status == "ready":
         try:
             figma_url = template.format(
                 run_id=ctx.run_id,
@@ -975,4 +1071,20 @@ def write_artifacts(
     result["export_status"] = export_status
     result["export_mode"] = export_mode
     result["export_error"] = export_error
+    result.update(_artifact_status_payload(spec))
+    output_metadata = _artifact_output_metadata(
+        spec,
+        ctx,
+        files,
+        {
+            "status": export_status,
+            "mode": export_mode,
+            "error": export_error,
+            "figma_url": figma_url,
+        },
+    )
+    files["output_metadata"].write_text(
+        json.dumps(output_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    result["output_metadata"] = str(files["output_metadata"])
     return result

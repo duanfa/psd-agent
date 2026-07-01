@@ -1,14 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
 from . import database
+from .input_layers import build_input_layers, render_input_prompt, semantic_brief_text
 from .llm import LLMClient, LLMUnavailable
-from .models import StageResult, UploadedAsset, WorkflowRequest
+from .models import (
+    StageResult,
+    StagePayloadValidationError,
+    UploadedAsset,
+    WorkflowRequest,
+    get_stage_contract_error_info,
+    normalize_layout_schema_payload,
+    validate_layout_schema_payload,
+    validate_stage_contract_payload,
+)
+from .retry_settings import RetryPolicy, resolve_stage_retry_policy
 from .runtime import append_log, append_stage_result, reset_run, set_run_state
 
 
@@ -82,7 +95,12 @@ class PipelineContext:
     effective_constraints: dict[str, Any] = field(default_factory=dict)
     layout_validation: dict[str, Any] = field(default_factory=dict)
     asset_match_report: dict[str, Any] = field(default_factory=dict)
+    asset_guard: dict[str, Any] = field(default_factory=dict)
+    result_state: dict[str, Any] = field(default_factory=dict)
     intermediate_preview: dict[str, Any] = field(default_factory=dict)
+    stage_contracts: dict[str, Any] = field(default_factory=dict)
+    stage_execution: dict[str, Any] = field(default_factory=dict)
+    input_layers: dict[str, Any] = field(default_factory=dict)
 
     @property
     def images(self) -> list[str]:
@@ -131,11 +149,510 @@ def _workflow_log(run_id: str, message: str, payload: Any | None = None) -> None
     append_log(run_id, "Workflow", message, payload)
 
 
+class StageContractError(Exception):
+    """阶段输出未通过结构校验，且重试后仍失败。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage_id: str = "",
+        error_code: str = "stage_contract_validation_failed",
+        reason_codes: list[str] | None = None,
+        issues: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage_id = stage_id
+        self.error_code = error_code
+        self.reason_codes = list(reason_codes or [])
+        self.issues = list(issues or [])
+
+
+def _split_validation_issues(exc: Exception) -> list[str]:
+    text = str(exc).strip() or exc.__class__.__name__
+    issues = [item.strip() for item in text.split("；") if item.strip()]
+    return issues or [text]
+
+
+def _resolve_retry_policy(stage_id: str) -> RetryPolicy:
+    return resolve_stage_retry_policy(stage_id)
+
+
+def _retry_policy_payload(policy: RetryPolicy) -> dict[str, Any]:
+    return {
+        "enabled": bool(policy.enabled),
+        "max_attempts": max(1, int(policy.max_attempts or 1)),
+        "retryable_error_codes": list(policy.retryable_error_codes),
+        "non_retryable_error_codes": list(policy.non_retryable_error_codes),
+    }
+
+
+_CRITICAL_STAGE_IDS = ("image_generation", "layout_engine", "copy", "figma_psd")
+
+
+def _stage_retry_exhausted_code(stage_id: str) -> str:
+    return f"{stage_id}_retry_exhausted"
+
+
+def _guard_error_code(guard_name: str, status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"failed", "blocked"}:
+        return f"{guard_name}_blocked"
+    if normalized == "warning":
+        return f"{guard_name}_warning"
+    return ""
+
+
+def _retry_summary_payload(stage_id: str, contract: Any) -> dict[str, Any]:
+    if not isinstance(contract, dict):
+        return {}
+    attempt_count = max(0, int(contract.get("attempt_count") or 0))
+    retries_used = max(0, int(contract.get("retries_used") or 0))
+    max_attempts = max(1, int(contract.get("max_attempts") or attempt_count or 1))
+    final_status = str(contract.get("final_status") or contract.get("status") or "")
+    stop_reason = str(contract.get("stop_reason") or "")
+    if final_status == "passed" and retries_used > 0:
+        retry_status = "passed_after_retry"
+    elif final_status == "passed":
+        retry_status = "not_needed"
+    elif stop_reason == "max_attempts_reached":
+        retry_status = "retry_exhausted"
+    elif stop_reason == "non_retryable_error":
+        retry_status = "not_retryable"
+    elif stop_reason == "retry_disabled":
+        retry_status = "retry_disabled"
+    elif retries_used > 0:
+        retry_status = "failed_after_retry"
+    else:
+        retry_status = "failed_without_retry"
+    return {
+        "status": retry_status,
+        "attempt_count": attempt_count,
+        "retries_used": retries_used,
+        "max_attempts": max_attempts,
+        "did_retry": bool(contract.get("did_retry")) if "did_retry" in contract else retries_used > 0,
+        "error_code": (
+            _stage_retry_exhausted_code(stage_id)
+            if retry_status == "retry_exhausted"
+            else ""
+        ),
+        "final_error_code": str(contract.get("final_error_code") or ""),
+    }
+
+
+def _stage_telemetry_payload(execution: Any) -> dict[str, Any] | None:
+    if not isinstance(execution, dict):
+        return None
+    return {
+        "status": str(execution.get("status") or ""),
+        "started_at": str(execution.get("started_at") or ""),
+        "completed_at": str(execution.get("completed_at") or ""),
+        "duration_ms": int(execution.get("duration_ms") or execution.get("elapsed_ms") or 0),
+        "error_code": str(execution.get("error_code") or ""),
+        "retry": dict(execution.get("retry") or {}),
+    }
+
+
+def _critical_stage_payloads(ctx: PipelineContext) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for stage_id in _CRITICAL_STAGE_IDS:
+        execution = ctx.stage_execution.get(stage_id)
+        if telemetry := _stage_telemetry_payload(execution):
+            payload[stage_id] = telemetry
+    return payload
+
+
+def _critical_check_payloads(
+    ctx: PipelineContext,
+    export_preflight: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "layout_guard": {
+            "status": str(ctx.layout_validation.get("status") or ""),
+            "error_code": str(ctx.layout_validation.get("error_code") or ""),
+        },
+        "asset_guard": {
+            "status": str(ctx.asset_guard.get("status") or ""),
+            "error_code": str(ctx.asset_guard.get("error_code") or ""),
+        },
+        "export_preflight": {
+            "status": str(export_preflight.get("status") or ""),
+            "error_code": str(export_preflight.get("error_code") or ""),
+        },
+    }
+
+
+def _extract_validation_failure(exc: Exception) -> tuple[str, str, str, list[str]]:
+    if isinstance(exc, StagePayloadValidationError):
+        issues = list(exc.issues) or _split_validation_issues(exc)
+        info = get_stage_contract_error_info(exc.error_code)
+        return (
+            info["error_code"],
+            str(exc.error_category or info["error_category"]),
+            str(exc.error_family or info["error_family"]),
+            issues[:8],
+        )
+    info = get_stage_contract_error_info("contract_violation")
+    return (
+        info["error_code"],
+        info["error_category"],
+        info["error_family"],
+        _split_validation_issues(exc)[:8],
+    )
+
+
+def _is_retryable_contract_error(policy: RetryPolicy, error_code: str) -> bool:
+    if not policy.enabled:
+        return False
+    if error_code in policy.non_retryable_error_codes:
+        return False
+    return error_code in policy.retryable_error_codes
+
+
+def _build_contract_retry_metadata(
+    *,
+    stage_id: str,
+    policy: RetryPolicy,
+    history: list[dict[str, Any]],
+    final_status: str,
+    final_error_code: str,
+    final_error_category: str,
+    final_error_family: str,
+    issues: list[str],
+    stop_reason: str,
+) -> dict[str, Any]:
+    attempt_count = len(history)
+    retries_used = max(0, attempt_count - 1)
+    metadata = {
+        "status": final_status,
+        "final_status": final_status,
+        "stage_id": stage_id,
+        "attempt_count": attempt_count,
+        "retries_used": retries_used,
+        "did_retry": retries_used > 0,
+        "max_attempts": max(1, int(policy.max_attempts or 1)),
+        "stop_reason": stop_reason,
+        "error_code": _stage_contract_failure_code(stage_id) if final_status == "failed" else "",
+        "final_error_code": final_error_code,
+        "error_category": final_error_category if final_status == "failed" else "",
+        "error_family": final_error_family if final_status == "failed" else "",
+        "final_error_category": final_error_category,
+        "final_error_family": final_error_family,
+        "reason_codes": [_stage_contract_reason_code(stage_id)] if final_status == "failed" else [],
+        "issues": list(issues[:8]),
+        "policy": _retry_policy_payload(policy),
+        "history": history,
+    }
+    metadata["retry"] = _retry_summary_payload(stage_id, metadata)
+    return metadata
+
+
+def _dedupe_text_items(values: list[str]) -> list[str]:
+    items: list[str] = []
+    for raw in values:
+        text = str(raw or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _summarize_missing_targets(issues: list[str]) -> str:
+    targets: list[str] = []
+    for issue in issues:
+        match = re.search(r"缺少\s+(.+)$", issue)
+        if match:
+            targets.append(match.group(1).strip())
+            continue
+        match = re.search(r"必填字段：(.+)$", issue)
+        if match:
+            targets.extend(
+                item.strip()
+                for item in re.split(r"[、,，/]", match.group(1))
+                if item.strip()
+            )
+            continue
+        match = re.search(r"至少需要\s+(.+)$", issue)
+        if match:
+            targets.append(match.group(1).strip())
+    return "；".join(_dedupe_text_items(targets)[:6])
+
+
+def _summarize_reference_targets(issues: list[str]) -> str:
+    targets: list[str] = []
+    for issue in issues:
+        if "：" not in issue:
+            continue
+        targets.extend(
+            item.strip()
+            for item in re.split(r"[、,，]", issue.split("：", 1)[1])
+            if item.strip()
+        )
+    return "、".join(_dedupe_text_items(targets)[:8])
+
+
+def _summarize_count_targets(issues: list[str]) -> str:
+    matched = [issue for issue in issues if ("期望" in issue) or ("数量" in issue)]
+    return "；".join(_dedupe_text_items(matched)[:3])
+
+
+def _build_repair_guidance(
+    *,
+    stage_id: str,
+    error_code: str,
+    error_category: str,
+    error_family: str,
+    issues: list[str],
+) -> list[str]:
+    if error_code in {"missing_required_fields", "missing_required_array"}:
+        missing_summary = _summarize_missing_targets(issues)
+        lines = [
+            "补齐缺失字段或数组，保留原有已正确的字段和值，不要省略其他必需字段。",
+        ]
+        if missing_summary:
+            lines.append(f"优先补齐这些缺口：{missing_summary}。")
+        return lines
+    if error_code == "count_mismatch":
+        count_summary = _summarize_count_targets(issues)
+        lines = [
+            "让数组条目数量与模块数、slot 计划或 contract 要求严格对齐，不多不少。",
+        ]
+        if count_summary:
+            lines.append(f"本次需要对齐的数量约束：{count_summary}。")
+        return lines
+    if error_code == "invalid_reference":
+        reference_summary = _summarize_reference_targets(issues)
+        lines = [
+            "所有 section_id、slot_id 和 required_image_slots 引用都必须来自当前 JSON 中已声明的 id。",
+            "不要引用不存在的 id，也不要把一个 section 的槽位绑定到另一个 section。",
+        ]
+        if reference_summary:
+            lines.append(f"优先修正这些引用：{reference_summary}。")
+        return lines
+    if error_code in {"invalid_payload_type", "invalid_field_type"}:
+        return [
+            "严格输出正确 JSON 类型：对象必须是对象，数组必须是数组，字符串字段不要返回对象、数组或 null。",
+            f"{stage_id} 阶段中的列表项也必须保持预期结构，不要混入非对象条目。",
+        ]
+    if error_code == "duplicate_identifier":
+        return [
+            "确保所有需要唯一的 id 或 name 保持唯一且稳定，不要生成重复标识。",
+        ]
+    return [
+        "按校验问题逐项修复结构，并重新输出完整 JSON。",
+        f"本次问题属于 {error_category}/{error_family} 类 contract 错误，请优先修复结构一致性。",
+    ]
+
+
+def _build_retry_prompt(
+    *,
+    stage_id: str,
+    base_prompt: str,
+    error_code: str,
+    error_category: str,
+    error_family: str,
+    issues: list[str],
+    last_payload: dict[str, Any],
+) -> str:
+    issue_lines = "\n".join(f"- {item}" for item in issues[:8])
+    guidance_lines = "\n".join(
+        f"- {item}"
+        for item in _build_repair_guidance(
+            stage_id=stage_id,
+            error_code=error_code,
+            error_category=error_category,
+            error_family=error_family,
+            issues=issues,
+        )
+    )
+    payload_text = json.dumps(last_payload, ensure_ascii=False, indent=2)
+    if len(payload_text) > 4000:
+        payload_text = payload_text[:4000] + "\n...（截断）"
+    return (
+        f"{base_prompt}\n\n"
+        "上一次输出未通过结构校验。请根据下面的定向修复要求，重新输出完整 JSON，"
+        "不要附加解释或 Markdown：\n"
+        f"错误类型：{error_code}\n"
+        f"错误类别：{error_category}\n"
+        f"错误族：{error_family}\n"
+        "定向修复要求：\n"
+        f"{guidance_lines}\n"
+        "校验问题：\n"
+        f"{issue_lines}\n\n"
+        "上一次输出如下：\n"
+        f"{payload_text}"
+    )
+
+
+def _stage_contract_failure_code(stage_id: str) -> str:
+    return f"{stage_id}_schema_contract_failed"
+
+
+def _stage_contract_reason_code(stage_id: str) -> str:
+    return f"{stage_id}_contract_failed"
+
+
+def _stage_error_payload(
+    stage_id: str,
+    error_code: str,
+    reason: str,
+    *,
+    reason_codes: list[str] | None = None,
+    issues: list[str] | None = None,
+    source: str = "stage",
+    retry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "stage_id": stage_id,
+        "error_code": error_code,
+        "reason_codes": list(reason_codes or []),
+        "reason": reason,
+        "issues": list(issues or []),
+        "source": source,
+        "retry": dict(retry or {}),
+    }
+
+
+def _invoke_stage_json_with_retry(
+    *,
+    ctx: PipelineContext,
+    stage_id: str,
+    invoke_model: Callable[[str], dict[str, Any]],
+    base_prompt: str,
+) -> dict[str, Any]:
+    if not hasattr(ctx, "stage_contracts") or not isinstance(
+        getattr(ctx, "stage_contracts", None), dict
+    ):
+        setattr(ctx, "stage_contracts", {})
+    policy = _resolve_retry_policy(stage_id)
+    max_attempts = max(1, int(policy.max_attempts or 1)) if policy.enabled else 1
+    prompt = base_prompt
+    last_payload: dict[str, Any] = {}
+    last_issues: list[str] = []
+    last_error_code = ""
+    last_error_category = ""
+    last_error_family = ""
+    stop_reason = "not_started"
+    history: list[dict[str, Any]] = []
+
+    for attempt in range(1, max_attempts + 1):
+        ctx.check_cancelled(f"{stage_id}:attempt_{attempt}")
+        data = invoke_model(prompt)
+        last_payload = data if isinstance(data, dict) else {"raw_payload": data}
+        try:
+            validated = validate_stage_contract_payload(stage_id, data)
+            history.append(
+                {
+                    "attempt": attempt,
+                    "status": "passed",
+                    "error_code": "",
+                    "error_category": "",
+                    "error_family": "",
+                    "issues": [],
+                    "retryable": False,
+                    "retry_scheduled": False,
+                }
+            )
+            validated["_contract_validation"] = _build_contract_retry_metadata(
+                stage_id=stage_id,
+                policy=policy,
+                history=history,
+                final_status="passed",
+                final_error_code="",
+                final_error_category="",
+                final_error_family="",
+                issues=[],
+                stop_reason="passed",
+            )
+            ctx.stage_contracts[stage_id] = dict(validated["_contract_validation"])
+            if attempt > 1:
+                _workflow_log(
+                    ctx.run_id,
+                    f"阶段结构重试成功：{stage_id}",
+                    validated["_contract_validation"],
+                )
+            return validated
+        except ValueError as exc:
+            (
+                last_error_code,
+                last_error_category,
+                last_error_family,
+                last_issues,
+            ) = _extract_validation_failure(exc)
+            retryable = _is_retryable_contract_error(policy, last_error_code)
+            retry_scheduled = retryable and attempt < max_attempts
+            history.append(
+                {
+                    "attempt": attempt,
+                    "status": "failed",
+                    "error_code": last_error_code,
+                    "error_category": last_error_category,
+                    "error_family": last_error_family,
+                    "issues": list(last_issues[:4]),
+                    "retryable": retryable,
+                    "retry_scheduled": retry_scheduled,
+                }
+            )
+            _workflow_log(
+                ctx.run_id,
+                f"阶段结构校验失败：{stage_id}（attempt {attempt}/{max_attempts}）",
+                {
+                    "error_code": last_error_code,
+                    "error_category": last_error_category,
+                    "error_family": last_error_family,
+                    "retryable": retryable,
+                    "retry_scheduled": retry_scheduled,
+                    "issues": last_issues,
+                    "payload_preview": last_payload,
+                },
+            )
+            if retry_scheduled:
+                prompt = _build_retry_prompt(
+                    stage_id=stage_id,
+                    base_prompt=base_prompt,
+                    error_code=last_error_code,
+                    error_category=last_error_category,
+                    error_family=last_error_family,
+                    issues=last_issues,
+                    last_payload=last_payload,
+                )
+                continue
+            if last_error_code in policy.non_retryable_error_codes:
+                stop_reason = "non_retryable_error"
+            elif policy.enabled and attempt >= max_attempts:
+                stop_reason = "max_attempts_reached"
+            elif not policy.enabled:
+                stop_reason = "retry_disabled"
+            else:
+                stop_reason = "policy_filtered_error"
+            break
+
+    ctx.stage_contracts[stage_id] = _build_contract_retry_metadata(
+        stage_id=stage_id,
+        policy=policy,
+        history=history,
+        final_status="failed",
+        final_error_code=last_error_code,
+        final_error_category=last_error_category,
+        final_error_family=last_error_family,
+        issues=last_issues,
+        stop_reason=stop_reason,
+    )
+    retries_used = max(0, len(history) - 1)
+    raise StageContractError(
+        f"结构校验失败，已重试 {retries_used} 次："
+        + "；".join(last_issues[:8] or ["模型输出结构不合法"]),
+        stage_id=stage_id,
+        error_code=_stage_contract_failure_code(stage_id),
+        reason_codes=[_stage_contract_reason_code(stage_id)],
+        issues=last_issues[:8],
+    )
+
+
 _SKIP_LABELS = ("商品类型", "商品名称", "品牌", "品牌名称", "使用场景", "页面", "标题字体", "段落字体", "英文字体", "要求")
 
 
 def _selling_points(ctx: PipelineContext) -> list[str]:
-    brief = ctx.request.product_brief
+    brief = semantic_brief_text(ctx.input_layers)
     product = ctx.request.product_name.strip()
     points: list[str] = []
     if brief:
@@ -162,6 +679,20 @@ def _selling_points(ctx: PipelineContext) -> list[str]:
     if unique:
         return unique[:6]
     return ["轻量通勤", "多分区收纳", "防泼水面料", "简洁商务风格"]
+
+
+def _input_prompt_block(
+    ctx: PipelineContext,
+    *,
+    include_layout_reference: bool = False,
+    include_raw_wireframe_dump: bool = False,
+) -> str:
+    prompt = render_input_prompt(
+        ctx.input_layers,
+        include_layout_reference=include_layout_reference,
+        include_raw_wireframe_dump=include_raw_wireframe_dump,
+    )
+    return f"{prompt}\n\n" if prompt else ""
 
 
 def _normalize_text_items(value: Any) -> list[str]:
@@ -598,7 +1129,7 @@ def _special_rule_payload(rule: dict[str, Any], marker: str, payload_key: str) -
     return None
 
 
-def _extract_layout_schema(rule: dict[str, Any]) -> dict[str, Any]:
+def _raw_extract_layout_schema(rule: dict[str, Any]) -> dict[str, Any]:
     direct = rule.get("layout_schema") or rule.get("layoutSchema")
     if isinstance(direct, dict):
         return direct
@@ -606,12 +1137,244 @@ def _extract_layout_schema(rule: dict[str, Any]) -> dict[str, Any]:
     return schema if isinstance(schema, dict) else {}
 
 
-def _extract_image_slots(rule: dict[str, Any]) -> list[dict[str, Any]]:
+def _raw_extract_image_slots(rule: dict[str, Any]) -> list[dict[str, Any]]:
     direct = rule.get("image_slots") or rule.get("imageSlots")
     if isinstance(direct, list):
         return [item for item in direct if isinstance(item, dict)]
     slots = _special_rule_payload(rule, "__image_slots__", "slots")
     return [item for item in slots if isinstance(item, dict)] if isinstance(slots, list) else []
+
+
+def _extract_layout_schema(rule: dict[str, Any]) -> dict[str, Any]:
+    return normalize_layout_schema_payload(
+        _raw_extract_layout_schema(rule),
+        detached_image_slots=_raw_extract_image_slots(rule),
+    )
+
+
+def _extract_image_slots(rule: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in _extract_layout_schema(rule).get("image_slots", []) if isinstance(item, dict)]
+
+
+def _slot_role_for_module(role: str) -> str:
+    mapping = {
+        "hero": "hero",
+        "feature": "detail",
+        "technology": "detail",
+        "scenario": "lifestyle",
+        "parameter": "size",
+        "brand_story": "brand_story",
+        "cta": "detail",
+    }
+    return mapping.get(role, "detail")
+
+
+def _required_text_fields_for_role(role: str) -> list[str]:
+    if role == "hero":
+        return ["headline", "subtitle"]
+    if role in {"feature", "technology", "scenario", "brand_story"}:
+        return ["headline", "body"]
+    if role == "parameter":
+        return ["headline", "points"]
+    if role == "cta":
+        return ["headline"]
+    return ["headline"]
+
+
+def _section_layout_plan(role: str, layout: str, canvas_width: int, height: int) -> tuple[dict[str, int | str], dict[str, int | str]]:
+    full_width = max(120, canvas_width - 80)
+    if role == "hero" or layout in {"hero_split", "centered_hero"}:
+        return (
+            {"x": 40, "y": 120, "w": full_width, "h": max(320, height - 240), "fit": "cover", "crop": "center"},
+            {"x": 40, "y": 48, "w": full_width, "h": 120, "align": "left"},
+        )
+    if role == "scenario" or layout == "full_bleed_scene":
+        return (
+            {"x": 0, "y": 0, "w": canvas_width, "h": height, "fit": "cover", "crop": "center"},
+            {"x": 40, "y": 56, "w": min(320, full_width), "h": 120, "align": "left"},
+        )
+    if role == "parameter" or layout == "spec_table":
+        return (
+            {"x": canvas_width - 280, "y": 150, "w": 220, "h": max(220, height - 260), "fit": "contain", "crop": "center"},
+            {"x": 40, "y": 56, "w": max(220, canvas_width - 360), "h": max(180, height - 120), "align": "left"},
+        )
+    if layout == "right_text_left_image":
+        return (
+            {"x": 40, "y": 120, "w": max(220, int(canvas_width * 0.48)), "h": max(240, height - 200), "fit": "cover", "crop": "center"},
+            {"x": int(canvas_width * 0.56), "y": 64, "w": max(180, canvas_width - int(canvas_width * 0.56) - 40), "h": max(180, height - 120), "align": "left"},
+        )
+    return (
+        {"x": max(240, int(canvas_width * 0.46)), "y": 120, "w": max(220, int(canvas_width * 0.44)), "h": max(240, height - 200), "fit": "cover", "crop": "center"},
+        {"x": 40, "y": 64, "w": max(180, int(canvas_width * 0.42)), "h": max(180, height - 120), "align": "left"},
+    )
+
+
+def _layout_compiler_inputs(ctx: PipelineContext) -> list[dict[str, Any]]:
+    info_arch = ctx.design_direction.get("information_architecture")
+    blueprint = ctx.layout_blueprint
+    inputs: list[dict[str, Any]] = []
+    if isinstance(info_arch, list):
+        for index, item in enumerate(info_arch, start=1):
+            if not isinstance(item, dict):
+                continue
+            blueprint_item = blueprint[index - 1] if index - 1 < len(blueprint) else {}
+            text = " ".join(
+                str(item.get(key) or "").strip()
+                for key in ("module_name", "layout", "content", "image_requirement")
+            )
+            role = str(blueprint_item.get("role") or _infer_module_role(text, index - 1))
+            inputs.append(
+                {
+                    "index": index,
+                    "name": str(item.get("module_name") or blueprint_item.get("name") or _role_display_name(role)),
+                    "role": role,
+                    "layout": str(item.get("layout") or blueprint_item.get("layout") or _infer_layout_type(text, role)),
+                    "content": str(item.get("content") or ""),
+                    "image_requirement": str(item.get("image_requirement") or ""),
+                }
+            )
+    if inputs:
+        return inputs[: ctx.request.layout.module_count]
+
+    for index, item in enumerate(blueprint, start=1):
+        role = str(item.get("role") or _infer_module_role(str(item.get("name") or ""), index - 1))
+        inputs.append(
+            {
+                "index": index,
+                "name": str(item.get("name") or _role_display_name(role)),
+                "role": role,
+                "layout": str(item.get("layout") or _infer_layout_type(str(item.get("name") or ""), role)),
+                "content": "",
+                "image_requirement": str(item.get("image_role") or ""),
+            }
+        )
+    return inputs[: ctx.request.layout.module_count]
+
+
+def _compile_layout_schema(ctx: PipelineContext, base_schema: dict[str, Any]) -> dict[str, Any]:
+    compiler_inputs = _layout_compiler_inputs(ctx)
+    if not compiler_inputs:
+        return normalize_layout_schema_payload(base_schema)
+
+    canvas_width = ctx.request.layout.canvas_width
+    y = 0
+    sections: list[dict[str, Any]] = []
+    slots: list[dict[str, Any]] = []
+    text_layers: list[dict[str, Any]] = []
+    component_templates: list[dict[str, Any]] = []
+
+    for item in compiler_inputs:
+        index = int(item.get("index") or len(sections) + 1)
+        role = _normalize_module_token(str(item.get("role") or "feature"))
+        name = str(item.get("name") or _role_display_name(role))
+        layout = str(item.get("layout") or _infer_layout_type(name, role))
+        height = ctx.request.layout.hero_height if role == "hero" or index == 1 else ctx.request.layout.module_height
+        section_id = f"compiled_{index:02d}_{role}"
+        slot_id = f"{section_id}_image"
+        image_role = _slot_role_for_module(role)
+        image_plan, text_plan = _section_layout_plan(role, layout, canvas_width, height)
+        semantic_tags = [
+            tag
+            for tag in {
+                role,
+                image_role,
+                str(item.get("image_requirement") or "").strip(),
+                str(item.get("content") or "").strip(),
+                name,
+            }
+            if tag
+        ]
+
+        sections.append(
+            {
+                "id": section_id,
+                "name": name,
+                "role": role,
+                "component_type": role,
+                "layout": layout,
+                "order": index,
+                "x": 0,
+                "y": y,
+                "w": canvas_width,
+                "h": height,
+                "background": {"type": "solid", "color": "#ffffff" if index % 2 else "#f7f7f4"},
+                "required_text_fields": _required_text_fields_for_role(role),
+                "optional_text_fields": ["points", "subtitle"] if role != "cta" else ["subtitle"],
+                "required_image_slots": [] if role == "cta" else [slot_id],
+                "optional_image_slots": [slot_id] if role == "cta" else [],
+            }
+        )
+        slots.append(
+            {
+                "id": slot_id,
+                "section_id": section_id,
+                "role": image_role,
+                "asset_type": image_role,
+                "x": image_plan["x"],
+                "y": image_plan["y"],
+                "w": image_plan["w"],
+                "h": image_plan["h"],
+                "fit": image_plan["fit"],
+                "crop": image_plan["crop"],
+                "priority": "high" if role in {"hero", "scenario"} else ("low" if role == "cta" else "medium"),
+                "required": role != "cta",
+                "semantic_tags": semantic_tags[:6],
+            }
+        )
+        text_layers.append(
+            {
+                "id": f"{section_id}_text",
+                "section_id": section_id,
+                "role": "headline",
+                "text": name,
+                "x": text_plan["x"],
+                "y": text_plan["y"],
+                "w": text_plan["w"],
+                "h": text_plan["h"],
+                "font": ctx.request.typography.title_font,
+                "font_size": ctx.request.typography.title_size,
+                "align": text_plan["align"],
+            }
+        )
+        component_templates.append(
+            {
+                "id": section_id,
+                "name": name,
+                "component_type": role,
+                "layout": layout,
+                "image_slot_count": 0 if role == "cta" else 1,
+                "text_layer_count": 1,
+                "source": "layout_compiler",
+            }
+        )
+        y += height
+
+    compiled = {
+        **base_schema,
+        "schema_version": str(base_schema.get("schema_version") or "brandos_layout_schema.v1"),
+        "page_type": str(base_schema.get("page_type") or "detail_page"),
+        "canvas": base_schema.get("canvas") if isinstance(base_schema.get("canvas"), dict) else {"width": canvas_width, "height_mode": "auto"},
+        "sections": sections,
+        "image_slots": slots,
+        "text_layers": text_layers,
+        "component_templates": component_templates,
+        "global_constraints": _constraint_prompt_payload(ctx),
+        "source_rule_id": ctx.detail_page_rule.get("id"),
+        "source_version": ctx.detail_page_rule.get("version"),
+        "compiled_from": {
+            "detail_rule_id": ctx.detail_page_rule.get("id"),
+            "page_planner": bool(ctx.design_direction),
+            "layout_blueprint_count": len(ctx.layout_blueprint),
+        },
+    }
+    return normalize_layout_schema_payload(compiled)
+
+
+def _resolve_layout_schema(ctx: PipelineContext) -> dict[str, Any]:
+    base_schema = _extract_layout_schema(ctx.detail_page_rule)
+    if base_schema.get("sections"):
+        return base_schema
+    return _compile_layout_schema(ctx, base_schema)
 
 
 def _merge_modules_with_blueprint(
@@ -652,32 +1415,82 @@ def _run_stage(
 ) -> StageResult:
     ctx.check_cancelled(f"{stage_id}:before")
     started = time.perf_counter()
+    started_at = datetime.utcnow()
     used_model = False
     status = "completed"
+    stage_error: dict[str, Any] | None = None
     set_run_state(ctx.run_id, "running", stage_id, title, icon)
     _workflow_log(ctx.run_id, f"开始阶段：{title} ({stage_id})")
     try:
         data = model_fn()
         used_model = True
         _workflow_log(ctx.run_id, f"模型阶段完成：{title} ({stage_id})", data)
+    except StageContractError as exc:
+        used_model = True
+        ctx.warnings.append(f"[{stage_id}] 结构校验失败，阶段内重试后仍降级：{exc}")
+        _workflow_log(ctx.run_id, f"阶段结构降级：{title} ({stage_id})，原因：{exc}")
+        data = fallback_fn()
+        contract_validation = dict(ctx.stage_contracts.get(stage_id) or {})
+        stage_error = _stage_error_payload(
+            stage_id,
+            str(contract_validation.get("error_code") or exc.error_code),
+            str(exc),
+            reason_codes=exc.reason_codes,
+            issues=exc.issues,
+            source="contract_validation",
+            retry=_retry_summary_payload(stage_id, contract_validation),
+        )
+        status = "fallback"
     except LLMUnavailable as exc:
         ctx.warnings.append(f"[{stage_id}] {exc}")
         _workflow_log(ctx.run_id, f"阶段降级：{title} ({stage_id})，原因：{exc}")
         data = fallback_fn()
+        stage_error = _stage_error_payload(
+            stage_id,
+            f"{stage_id}_llm_unavailable",
+            str(exc),
+            reason_codes=[f"{stage_id}_fallback_used"],
+            source="llm",
+        )
         status = "fallback"
     except Exception as exc:  # pragma: no cover - 阶段级兜底
         ctx.warnings.append(f"[{stage_id}] 未知异常已降级：{exc}")
         _workflow_log(ctx.run_id, f"阶段异常降级：{title} ({stage_id})，原因：{exc}")
         data = fallback_fn()
+        stage_error = _stage_error_payload(
+            stage_id,
+            f"{stage_id}_unexpected_fallback",
+            str(exc),
+            reason_codes=[f"{stage_id}_fallback_used"],
+            source="unexpected",
+        )
         status = "fallback"
 
+    if isinstance(data, dict) and stage_error and "_stage_error" not in data:
+        data["_stage_error"] = stage_error
     summary = summarize(data, used_model)
     ctx.report_parts.append(f"## {title}\n{summary}")
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    completed_at = datetime.utcnow()
+    contract_validation = dict(ctx.stage_contracts.get(stage_id) or {})
+    retry_summary = _retry_summary_payload(stage_id, contract_validation)
+    error_code = str((stage_error or {}).get("error_code") or "")
     _workflow_log(
         ctx.run_id,
         f"结束阶段：{title} ({stage_id})，status={status}，used_model={used_model}，elapsed_ms={elapsed_ms}，summary={summary}",
     )
+    ctx.stage_execution[stage_id] = {
+        "status": status,
+        "used_model": used_model,
+        "summary": summary,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "duration_ms": elapsed_ms,
+        "error_code": error_code,
+        "retry": retry_summary,
+        "error": dict(stage_error or {}),
+        "contract_validation": contract_validation,
+    }
     result = StageResult(
         id=stage_id,
         title=title,
@@ -688,6 +1501,11 @@ def _run_stage(
         data=data,
         used_model=used_model,
         elapsed_ms=elapsed_ms,
+        started_at=started_at.isoformat(),
+        completed_at=completed_at.isoformat(),
+        duration_ms=elapsed_ms,
+        error_code=error_code,
+        retry=retry_summary,
     )
     append_stage_result(ctx.run_id, result)
     ctx.check_cancelled(f"{stage_id}:after")
@@ -705,7 +1523,7 @@ def stage_vision(ctx: PipelineContext) -> StageResult:
             f"商品名称：{req.product_name}\n"
             f"品牌：{req.brand_name}\n"
             f"商品图文件名：{image_names}\n"
-            f"brief 文本：\n{req.product_brief}\n\n"
+            f"{_input_prompt_block(ctx)}"
             f"{_constraint_prompt_block(ctx)}"
             "请输出 Product Brief 基础信息，字段："
             "product_type, target_audience, main_color, material, key_features(数组), "
@@ -779,14 +1597,21 @@ def stage_structured(ctx: PipelineContext) -> StageResult:
     req = ctx.request
 
     def model_fn() -> dict[str, Any]:
-        prompt = (
+        base_prompt = (
             f"商品视觉信息：{json.dumps(ctx.product_info, ensure_ascii=False)}\n"
-            f"brief 文本：\n{req.product_brief}\n\n"
+            f"{_input_prompt_block(ctx)}"
             f"{_constraint_prompt_block(ctx)}"
             "请合并视觉信息与 brief，输出 Product Brief："
             "brand, product, audience, selling_points(数组), specifications(对象), scenarios(数组), design_focus。"
         )
-        data = ctx.llm.invoke_json(req.prompts.structured_agent_prompt, prompt)
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="product_brief",
+            base_prompt=base_prompt,
+            invoke_model=lambda attempt_prompt: ctx.llm.invoke_json(
+                req.prompts.structured_agent_prompt, attempt_prompt
+            ),
+        )
         data["selling_points"] = _normalize_text_items(data.get("selling_points")) or _selling_points(ctx)
         ctx.structured_info = data
         return data
@@ -830,7 +1655,7 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
     selected_detail_rule = ctx.detail_page_rule or {}
 
     def model_fn() -> dict[str, Any]:
-        prompt = (
+        base_prompt = (
             f"品牌：{req.brand_name}\n"
             f"品牌规范：\n{req.brand_guidelines}\n"
             f"参考图说明：\n{req.reference_notes}\n"
@@ -847,23 +1672,33 @@ def stage_brand_rag(ctx: PipelineContext) -> StageResult:
             "fonts(对象，含 title、body、english), layout_rules(数组), component_patterns(数组), prompt_templates(数组), module_order(数组)。"
         )
         reference_image_paths = ctx.reference_image_paths[: settings.max_vision_images]
-        if reference_image_paths and settings.enable_vision:
-            data = ctx.llm.invoke_vision_json(
-                req.prompts.brand_rag_agent_prompt,
-                prompt,
-                reference_image_paths,
-            )
-            data["_reference_vision"] = {
-                "mode": "multimodal",
-                "model": settings.vision_model,
-                "images": [Path(path).name for path in reference_image_paths],
-            }
-        else:
-            data = ctx.llm.invoke_json(req.prompts.brand_rag_agent_prompt, prompt)
-            data["_reference_vision"] = {
+
+        def invoke_model(attempt_prompt: str) -> dict[str, Any]:
+            if reference_image_paths and settings.enable_vision:
+                payload = ctx.llm.invoke_vision_json(
+                    req.prompts.brand_rag_agent_prompt,
+                    attempt_prompt,
+                    reference_image_paths,
+                )
+                payload["_reference_vision"] = {
+                    "mode": "multimodal",
+                    "model": settings.vision_model,
+                    "images": [Path(path).name for path in reference_image_paths],
+                }
+                return payload
+            payload = ctx.llm.invoke_json(req.prompts.brand_rag_agent_prompt, attempt_prompt)
+            payload["_reference_vision"] = {
                 "mode": "text",
                 "images": ctx.reference_images,
             }
+            return payload
+
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="brand_knowledge",
+            base_prompt=base_prompt,
+            invoke_model=invoke_model,
+        )
         if ctx.layout_blueprint:
             data["module_order"] = [item["name"] for item in ctx.layout_blueprint]
             data["selected_core_rule"] = selected_core_rule
@@ -945,7 +1780,7 @@ def stage_design(ctx: PipelineContext) -> StageResult:
     detail_rule = ctx.detail_page_rule or {}
 
     def model_fn() -> dict[str, Any]:
-        prompt = (
+        base_prompt = (
             f"商品结构：{json.dumps(ctx.structured_info, ensure_ascii=False)}\n"
             f"品牌风格：{json.dumps(ctx.brand_profile, ensure_ascii=False)}\n"
             f"选中的 Core Rule：{json.dumps(ctx.core_rule, ensure_ascii=False)}\n"
@@ -954,13 +1789,21 @@ def stage_design(ctx: PipelineContext) -> StageResult:
             f"工作流模式：{req.workflow_mode.value}\n"
             f"参考图说明：{req.reference_notes}\n\n"
             f"参考案例图片：{ctx.reference_images}\n\n"
+            f"{_input_prompt_block(ctx, include_layout_reference=True)}"
             f"{_constraint_prompt_block(ctx)}"
             "请输出页面规划策略，字段："
             "direction(整体视觉方向，字符串), page_template(数组), information_architecture(数组), "
             "tone(色调与节奏), image_strategy(图片资产需求), brand_constraints(数组), risks(数组)。"
             "如果已提供详情页 Derived Rule，page_template 与 information_architecture 必须优先服从该规则，不要退回默认模块顺序。"
         )
-        data = ctx.llm.invoke_json(req.prompts.design_agent_prompt, prompt)
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="page_planner",
+            base_prompt=base_prompt,
+            invoke_model=lambda attempt_prompt: ctx.llm.invoke_json(
+                req.prompts.design_agent_prompt, attempt_prompt
+            ),
+        )
         if ctx.layout_blueprint:
             data["page_template"] = [item["name"] for item in ctx.layout_blueprint]
         ctx.design_direction = data
@@ -1011,58 +1854,90 @@ _FALLBACK_MODULE_TEMPLATES = [
 def stage_layout(ctx: PipelineContext) -> StageResult:
     req = ctx.request
     count = req.layout.module_count
-    layout_schema = _extract_layout_schema(ctx.detail_page_rule)
+    layout_schema = _resolve_layout_schema(ctx)
+    layout_guard = _build_layout_guard_report(layout_schema, ctx)
 
     def model_fn() -> dict[str, Any]:
         schema_modules = _modules_from_layout_schema(layout_schema, ctx)
-        if schema_modules:
+        if layout_guard["can_execute"] and schema_modules:
             ctx.modules = schema_modules
             ctx.layout_validation = _validate_layout_schema(layout_schema, ctx)
             ctx.asset_match_report = _build_asset_match_report(ctx.modules, ctx)
+            ctx.asset_guard = _build_asset_guard_report(ctx)
             return {
                 "layout_schema": layout_schema,
+                "layout_guard": layout_guard,
                 "layout_validation": ctx.layout_validation,
                 "asset_match_report": ctx.asset_match_report,
+                "asset_guard": ctx.asset_guard,
                 "modules": ctx.modules,
                 "mode": "executable_schema",
             }
-        prompt = (
-            f"设计方向：{json.dumps(ctx.design_direction, ensure_ascii=False)}\n"
-            f"品牌模块顺序：{ctx.brand_profile.get('module_order')}\n"
-            f"选中的详情页 Derived Rule：{json.dumps(ctx.detail_page_rule, ensure_ascii=False)}\n"
-            f"可执行 Layout Schema：{json.dumps(layout_schema, ensure_ascii=False)}\n"
-            f"图片槽定义：{json.dumps(_extract_image_slots(ctx.detail_page_rule), ensure_ascii=False)}\n"
-            f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
-            f"参考案例图片：{ctx.reference_images}\n"
-            f"已生成图片素材：{ctx.generated_image_names}\n"
-            f"画布宽度：{req.layout.canvas_width}px，模块数量：{count}\n"
-            f"主视觉高度：{req.layout.hero_height}，普通模块高度：{req.layout.module_height}\n"
-            f"可用商品图：{ctx.images}\n\n"
-            f"{_constraint_prompt_block(ctx)}"
-            "请输出版式规划，字段 modules 为数组，每个元素含："
-            "name(模块中文名), layer_group(英文图层组名), layout(布局类型), "
-            "height(整数像素), role(hero/feature/technology/scenario/parameter/brand_story/cta), "
-            "image_role(该模块主要用什么图), elements(图层元素数组)。"
-            f"模块数量必须是 {count} 个。"
-            "如果已提供强布局蓝图，必须优先保持相同模块顺序、主次层级、图文左右关系和大图区位置。"
+        prompt_payload = _layout_prompt_payload(ctx, layout_schema, layout_guard)
+        base_prompt = (
+            "请根据以下结构化上下文补全 layout modules。要求：\n"
+            "1. 优先遵守 layout_schema 与 layout_guard，不要自由改写模块意图。\n"
+            "2. 如果 layout_guard 未通过，只能输出与现有强布局蓝图一致的最小可行模块结果。\n"
+            "3. 输出 modules 数组，每个元素包含："
+            "name, layer_group, layout, height, role, image_role, elements。\n"
+            f"4. 模块数量必须是 {count} 个。\n"
+            "5. 不要重复返回完整规则原文，只输出布局结果。\n\n"
+            f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
         )
-        data = ctx.llm.invoke_json(req.prompts.layout_agent_prompt, prompt)
-        modules = data.get("modules")
-        if not isinstance(modules, list) or not modules:
-            raise LLMUnavailable("版式 Agent 未返回 modules 数组")
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="layout_engine",
+            base_prompt=base_prompt,
+            invoke_model=lambda attempt_prompt: ctx.llm.invoke_json(
+                req.prompts.layout_agent_prompt, attempt_prompt
+            ),
+        )
+        modules = data.get("modules") or []
         ctx.modules = _normalize_modules(_merge_modules_with_blueprint(modules, ctx.layout_blueprint), ctx)
-        return {"modules": ctx.modules}
+        ctx.layout_validation = {
+            "status": "failed",
+            "issues": list(layout_guard["issues"]) or ["未命中可执行详情页 Derived Rule / layout_schema，Layout Engine 未执行结构化 schema"],
+            "warnings": list(layout_guard["warnings"]) + ["当前布局来自模型规划结果，仍需人工确认是否符合品牌模板"],
+            "section_count": len(layout_schema.get("sections", [])) if isinstance(layout_schema, dict) else 0,
+            "image_slot_count": len(layout_schema.get("image_slots", [])) if isinstance(layout_schema, dict) else 0,
+            "guard_status": layout_guard["status"],
+            "guard_can_execute": layout_guard["can_execute"],
+            "high_priority_slot_count": layout_guard["high_priority_slot_count"],
+            "required_asset_roles": layout_guard["required_asset_roles"],
+            "available_asset_roles": layout_guard["available_asset_roles"],
+            "missing_asset_roles": layout_guard["missing_asset_roles"],
+        }
+        ctx.asset_match_report = {
+            "status": "skipped",
+            "match_count": 0,
+            "slot_count": len(layout_schema.get("image_slots", [])) if isinstance(layout_schema, dict) else 0,
+            "unmatched_slots": [],
+            "matches": [],
+            "reason": "Layout Guard 未通过，当前布局未消费可执行 image_slots",
+        }
+        ctx.asset_guard = _build_asset_guard_report(ctx)
+        return {
+            "modules": ctx.modules,
+            "layout_guard": layout_guard,
+            "layout_validation": ctx.layout_validation,
+            "asset_match_report": ctx.asset_match_report,
+            "asset_guard": ctx.asset_guard,
+            "mode": "llm_layout_plan",
+        }
 
     def fallback_fn() -> dict[str, Any]:
         schema_modules = _modules_from_layout_schema(layout_schema, ctx)
-        if schema_modules:
+        if layout_guard["can_execute"] and schema_modules:
             ctx.modules = schema_modules
             ctx.layout_validation = _validate_layout_schema(layout_schema, ctx)
             ctx.asset_match_report = _build_asset_match_report(ctx.modules, ctx)
+            ctx.asset_guard = _build_asset_guard_report(ctx)
             return {
                 "layout_schema": layout_schema,
+                "layout_guard": layout_guard,
                 "layout_validation": ctx.layout_validation,
                 "asset_match_report": ctx.asset_match_report,
+                "asset_guard": ctx.asset_guard,
                 "modules": ctx.modules,
                 "mode": "executable_schema_fallback",
             }
@@ -1076,26 +1951,32 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
         ctx.modules = _normalize_modules(modules, ctx)
         ctx.layout_validation = {
             "status": "failed",
-            "issues": ["未命中可执行详情页 Derived Rule / layout_schema，Layout Engine 已回退通用模块模板"],
-            "warnings": ["当前结果只能作为低保真草稿，不能视为已执行品牌详情页布局规范"],
-            "section_count": 0,
-            "image_slot_count": 0,
-            "required_asset_roles": [],
+            "issues": list(layout_guard["issues"]) or ["未命中可执行详情页 Derived Rule / layout_schema，Layout Engine 已回退通用模块模板"],
+            "warnings": list(layout_guard["warnings"]) or ["当前结果只能作为低保真草稿，不能视为已执行品牌详情页布局规范"],
+            "section_count": len(layout_schema.get("sections", [])) if isinstance(layout_schema, dict) else 0,
+            "image_slot_count": len(layout_schema.get("image_slots", [])) if isinstance(layout_schema, dict) else 0,
+            "guard_status": layout_guard["status"],
+            "guard_can_execute": layout_guard["can_execute"],
+            "high_priority_slot_count": layout_guard["high_priority_slot_count"],
+            "required_asset_roles": layout_guard["required_asset_roles"],
             "available_asset_roles": sorted({_asset_role(name) for name in [*ctx.images, *ctx.reference_images, *ctx.generated_image_names]}),
-            "missing_asset_roles": [],
+            "missing_asset_roles": layout_guard["missing_asset_roles"],
         }
         ctx.asset_match_report = {
             "status": "skipped",
             "match_count": 0,
-            "slot_count": 0,
+            "slot_count": len(layout_schema.get("image_slots", [])) if isinstance(layout_schema, dict) else 0,
             "unmatched_slots": [],
             "matches": [],
-            "reason": "无 image_slots，无法执行语义图片槽匹配",
+            "reason": "Layout Guard 未通过或无可执行 image_slots，无法执行语义图片槽匹配",
         }
+        ctx.asset_guard = _build_asset_guard_report(ctx)
         return {
             "modules": ctx.modules,
+            "layout_guard": layout_guard,
             "layout_validation": ctx.layout_validation,
             "asset_match_report": ctx.asset_match_report,
+            "asset_guard": ctx.asset_guard,
             "mode": "fallback_blueprint",
         }
 
@@ -1146,15 +2027,17 @@ def _normalize_modules(
 
 def _asset_role(name: str) -> str:
     text = name.lower()
+    if any(token in text for token in ("hero", "主视觉", "头图", "banner", "kv")):
+        return "hero"
     if any(token in text for token in ("recommend", "人气", "panenka", "campo", "conder", "kids", "v90")):
         return "recommendation"
-    if any(token in text for token in ("model", "routine", "moves", "小红书", "场景", "搭配", "lifestyle")):
+    if any(token in text for token in ("scenario", "model", "routine", "moves", "小红书", "场景", "搭配", "lifestyle")):
         return "lifestyle"
-    if any(token in text for token in ("size", "尺码", "参数")):
+    if any(token in text for token in ("parameter", "size", "尺码", "参数")):
         return "size"
     if any(token in text for token in ("brand", "story", "logo")):
         return "brand_story"
-    if any(token in text for token in ("_1", "packshot", "product", "产品", "volley")):
+    if any(token in text for token in ("product_gallery", "_1", "packshot", "product", "产品", "volley")):
         return "product_gallery"
     return "detail"
 
@@ -1164,6 +2047,102 @@ def _ranked_image_candidates(role: str, ctx: PipelineContext) -> list[str]:
     preferred = [name for name in images if _asset_role(name) == role]
     fallback = [name for name in images if name not in preferred]
     return preferred + fallback
+
+
+def _compact_layout_schema_for_prompt(schema: dict[str, Any]) -> dict[str, Any]:
+    sections = [
+        {
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or ""),
+            "role": str(item.get("role") or item.get("component_type") or ""),
+            "order": int(item.get("order") or index),
+            "w": int(item.get("w") or 0),
+            "h": int(item.get("h") or 0),
+        }
+        for index, item in enumerate(schema.get("sections", []), start=1)
+        if isinstance(item, dict)
+    ]
+    slots = [
+        {
+            "id": str(item.get("id") or ""),
+            "section_id": str(item.get("section_id") or ""),
+            "role": str(item.get("role") or item.get("asset_type") or ""),
+            "priority": str(item.get("priority") or "medium"),
+            "required": bool(item.get("required", True)),
+            "semantic_tags": item.get("semantic_tags") or [],
+            "w": int(item.get("w") or 0),
+            "h": int(item.get("h") or 0),
+        }
+        for item in schema.get("image_slots", [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "page_type": str(schema.get("page_type") or "detail_page"),
+        "schema_version": str(schema.get("schema_version") or "brandos_layout_schema.v1"),
+        "section_count": len(sections),
+        "image_slot_count": len(slots),
+        "sections": sections[:12],
+        "image_slots": slots[:36],
+    }
+
+
+def _layout_prompt_payload(
+    ctx: PipelineContext,
+    layout_schema: dict[str, Any],
+    layout_guard: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "design_direction": {
+            "direction": ctx.design_direction.get("direction"),
+            "page_template": ctx.design_direction.get("page_template"),
+            "information_architecture": ctx.design_direction.get("information_architecture"),
+        },
+        "layout_guard": layout_guard,
+        "layout_schema": _compact_layout_schema_for_prompt(layout_schema),
+        "layout_blueprint": ctx.layout_blueprint,
+        "available_assets": {
+            "product_images": ctx.images,
+            "reference_images": ctx.reference_images,
+            "generated_images": ctx.generated_image_names,
+        },
+        "canvas": {
+            "width": ctx.request.layout.canvas_width,
+            "module_count": ctx.request.layout.module_count,
+            "hero_height": ctx.request.layout.hero_height,
+            "module_height": ctx.request.layout.module_height,
+        },
+        "constraints": _constraint_prompt_payload(ctx),
+    }
+
+
+def _slot_prompt_items(schema: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    sections = {
+        str(section.get("id") or ""): section
+        for section in schema.get("sections", [])
+        if isinstance(section, dict)
+    }
+    for slot in schema.get("image_slots", []):
+        if not isinstance(slot, dict):
+            continue
+        section = sections.get(str(slot.get("section_id") or ""), {})
+        items.append(
+            {
+                "slot_id": str(slot.get("id") or ""),
+                "section_id": str(slot.get("section_id") or ""),
+                "section_name": str(section.get("name") or ""),
+                "section_role": str(section.get("role") or section.get("component_type") or ""),
+                "role": str(slot.get("role") or slot.get("asset_type") or ""),
+                "priority": str(slot.get("priority") or "medium"),
+                "required": bool(slot.get("required", True)),
+                "semantic_tags": slot.get("semantic_tags") or [],
+                "size": {
+                    "w": int(slot.get("w") or 0),
+                    "h": int(slot.get("h") or 0),
+                },
+            }
+        )
+    return items
 
 
 def _modules_from_layout_schema(
@@ -1179,7 +2158,9 @@ def _modules_from_layout_schema(
     modules: list[dict[str, Any]] = []
     for index, section in enumerate(sections[: ctx.request.layout.module_count], start=1):
         section_id = str(section.get("id") or f"section_{index:02d}")
-        role = _normalize_module_token(str(section.get("component_type") or section_id or section.get("name") or "detail"))
+        role = _normalize_module_token(
+            str(section.get("role") or section.get("component_type") or section_id or section.get("name") or "detail")
+        )
         section_slots = [slot for slot in image_slots if str(slot.get("section_id") or "") == section_id]
         section_text = [layer for layer in text_layers if str(layer.get("section_id") or "") == section_id]
         height = section.get("h") or section.get("height") or ctx.request.layout.module_height
@@ -1232,15 +2213,62 @@ def _modules_from_layout_schema(
     return modules
 
 
+def _build_layout_guard_report(schema: dict[str, Any], ctx: PipelineContext) -> dict[str, Any]:
+    report = validate_layout_schema_payload(schema)
+    normalized_schema = (
+        report.get("normalized_schema")
+        if isinstance(report.get("normalized_schema"), dict)
+        else {}
+    )
+    slots = [item for item in normalized_schema.get("image_slots", []) if isinstance(item, dict)]
+    issues = [str(item) for item in report.get("issues", []) if str(item).strip()]
+    warnings = [str(item) for item in report.get("warnings", []) if str(item).strip()]
+    high_priority_slots = [
+        slot
+        for slot in slots
+        if str(slot.get("priority") or "").lower() == "high" or bool(slot.get("required", True))
+    ]
+
+    available_roles = sorted(
+        {_asset_role(name) for name in [*ctx.images, *ctx.reference_images, *ctx.generated_image_names]}
+    )
+    required_roles = sorted(
+        {str(slot.get("role") or slot.get("asset_type") or "detail") for slot in high_priority_slots}
+    )
+    missing_roles = [
+        role for role in required_roles if role not in available_roles and role not in {"detail", "hero"}
+    ]
+    if missing_roles:
+        warnings.append(f"高优先级图片槽缺少对应素材角色：{', '.join(missing_roles)}")
+
+    status = "blocked" if issues else ("warning" if warnings else "passed")
+    return {
+        "status": status,
+        "can_execute": not issues,
+        "error_code": _guard_error_code("layout_guard", status),
+        "issues": issues,
+        "warnings": warnings,
+        "section_count": int(report.get("section_count") or 0),
+        "image_slot_count": int(report.get("image_slot_count") or 0),
+        "high_priority_slot_count": int(report.get("high_priority_slot_count") or 0),
+        "required_asset_roles": required_roles,
+        "available_asset_roles": available_roles,
+        "missing_asset_roles": missing_roles,
+    }
+
+
 def _validate_layout_schema(schema: dict[str, Any], ctx: PipelineContext) -> dict[str, Any]:
-    sections = [item for item in schema.get("sections", []) if isinstance(item, dict)]
-    slots = [item for item in schema.get("image_slots", []) if isinstance(item, dict)]
-    issues: list[str] = []
-    warnings: list[str] = []
-    if not schema:
-        issues.append("未命中可执行 layout_schema")
-    if schema and not sections:
-        issues.append("layout_schema 缺少 sections")
+    guard = _build_layout_guard_report(schema, ctx)
+    report = validate_layout_schema_payload(schema)
+    normalized_schema = (
+        report.get("normalized_schema")
+        if isinstance(report.get("normalized_schema"), dict)
+        else {}
+    )
+    sections = [item for item in normalized_schema.get("sections", []) if isinstance(item, dict)]
+    slots = [item for item in normalized_schema.get("image_slots", []) if isinstance(item, dict)]
+    issues = list(guard["issues"])
+    warnings = list(guard["warnings"])
     if schema and not slots:
         warnings.append("layout_schema 缺少 image_slots，图片匹配会退回模块级候选")
     section_ids = {str(item.get("id") or "") for item in sections}
@@ -1267,8 +2295,11 @@ def _validate_layout_schema(schema: dict[str, Any], ctx: PipelineContext) -> dic
         "status": "failed" if issues else ("warning" if warnings or missing_roles else "passed"),
         "issues": issues,
         "warnings": warnings,
-        "section_count": len(sections),
-        "image_slot_count": len(slots),
+        "section_count": int(report.get("section_count") or len(sections)),
+        "image_slot_count": int(report.get("image_slot_count") or len(slots)),
+        "guard_status": guard["status"],
+        "guard_can_execute": guard["can_execute"],
+        "high_priority_slot_count": int(report.get("high_priority_slot_count") or guard["high_priority_slot_count"]),
         "required_asset_roles": required_roles,
         "available_asset_roles": available_roles,
         "missing_asset_roles": missing_roles,
@@ -1276,25 +2307,101 @@ def _validate_layout_schema(schema: dict[str, Any], ctx: PipelineContext) -> dic
 
 
 def _build_asset_match_report(modules: list[dict[str, Any]], ctx: PipelineContext) -> dict[str, Any]:
+    assets = ctx.images + ctx.reference_images + ctx.generated_image_names
+    used_assets: set[str] = set()
     matches = []
     unmatched = []
-    for module in modules:
-        for slot in module.get("image_slots") or []:
+
+    def candidate_score(name: str, slot: dict[str, Any], module: dict[str, Any]) -> tuple[int, int, int, str]:
+        role = str(slot.get("role") or slot.get("asset_type") or module.get("role") or "detail")
+        normalized_name = name.lower()
+        asset_role = _asset_role(name)
+        semantic_tags = [str(tag).lower() for tag in slot.get("semantic_tags") or [] if str(tag).strip()]
+        score = 0
+        if asset_role == role:
+            score += 60
+        elif role in {"hero", "product_gallery"} and asset_role in {"product_gallery", "detail"}:
+            score += 40
+        elif role in {"scenario", "lifestyle"} and asset_role == "lifestyle":
+            score += 40
+        elif role in {"parameter", "size"} and asset_role == "size":
+            score += 40
+        elif role in {"brand_story"} and asset_role == "brand_story":
+            score += 40
+        elif asset_role == "detail":
+            score += 20
+
+        if str(module.get("role") or "") == "hero" and asset_role in {"hero", "product_gallery", "detail"}:
+            score += 10
+        if name in ctx.images:
+            score += 8
+        elif name in ctx.reference_images:
+            score += 5
+        elif name in ctx.generated_image_names:
+            score += 2
+        if name in used_assets:
+            score -= 12
+
+        tag_hits = 0
+        for tag in semantic_tags:
+            token = tag.replace("_", " ").strip()
+            if not token:
+                continue
+            parts = [part for part in token.split() if len(part) > 1]
+            if token in normalized_name or any(part in normalized_name for part in parts):
+                tag_hits += 1
+        score += tag_hits * 6
+        return (score, tag_hits, 1 if name in ctx.images else 0, name)
+
+    slot_queue: list[tuple[int, int, dict[str, Any], dict[str, Any]]] = []
+    for module_index, module in enumerate(modules):
+        for slot_index, slot in enumerate(module.get("image_slots") or []):
             if not isinstance(slot, dict):
                 continue
-            role = str(slot.get("role") or slot.get("asset_type") or module.get("role") or "detail")
-            candidates = _ranked_image_candidates(role, ctx)
-            chosen = candidates[0] if candidates else ""
-            item = {
-                "slot_id": slot.get("id") or "",
-                "section_id": slot.get("section_id") or "",
-                "role": role,
-                "chosen_asset": chosen,
-                "candidate_count": len(candidates),
-            }
-            matches.append(item)
-            if not chosen:
-                unmatched.append(item)
+            priority = str(slot.get("priority") or "medium").lower()
+            required = bool(slot.get("required", True))
+            weight = 0 if (required or priority == "high") else (1 if priority == "medium" else 2)
+            slot_queue.append((weight, module_index * 100 + slot_index, module, slot))
+
+    for _, _, module, slot in sorted(slot_queue, key=lambda item: (item[0], item[1])):
+        role = str(slot.get("role") or slot.get("asset_type") or module.get("role") or "detail")
+        ranked = sorted(
+            assets,
+            key=lambda name: candidate_score(name, slot, module),
+            reverse=True,
+        )
+        candidates = [name for name in ranked if candidate_score(name, slot, module)[0] > 0] or ranked
+        chosen = candidates[0] if candidates else ""
+        if chosen:
+            used_assets.add(chosen)
+            slot["matched_asset"] = chosen
+        item = {
+            "slot_id": slot.get("id") or "",
+            "section_id": slot.get("section_id") or "",
+            "role": role,
+            "priority": str(slot.get("priority") or "medium"),
+            "required": bool(slot.get("required", True)),
+            "semantic_tags": slot.get("semantic_tags") or [],
+            "chosen_asset": chosen,
+            "candidate_count": len(candidates),
+            "top_candidates": candidates[:5],
+        }
+        matches.append(item)
+        if not chosen:
+            unmatched.append(item)
+
+    for module in modules:
+        slot_assets = [
+            str(slot.get("matched_asset") or "").strip()
+            for slot in module.get("image_slots") or []
+            if isinstance(slot, dict) and str(slot.get("matched_asset") or "").strip()
+        ]
+        merged_candidates = []
+        for name in [*slot_assets, *(module.get("image_candidates") or [])]:
+            if name and name not in merged_candidates:
+                merged_candidates.append(name)
+        if merged_candidates:
+            module["image_candidates"] = merged_candidates
     return {
         "status": "passed" if not unmatched else "warning",
         "match_count": len(matches) - len(unmatched),
@@ -1304,11 +2411,452 @@ def _build_asset_match_report(modules: list[dict[str, Any]], ctx: PipelineContex
     }
 
 
+def _asset_guard_action_items(
+    missing_roles: list[str],
+    missing_slot_ids: list[str],
+    layout_failed: bool,
+    slot_count: int,
+) -> list[str]:
+    actions: list[str] = []
+    if layout_failed:
+        actions.append("先修复 layout_schema / Layout Guard，再进入正式导出。")
+    if slot_count == 0:
+        actions.append("当前缺少可验证的 image_slots，建议先补齐可执行布局协议。")
+    if missing_roles:
+        actions.append("补齐关键素材类型：" + "、".join(missing_roles[:6]))
+    if missing_slot_ids:
+        actions.append("优先替换未命中的关键图片槽：" + "、".join(missing_slot_ids[:6]))
+    if not actions:
+        actions.append("关键素材已覆盖，可继续进入正式导出或人工精修。")
+    return actions
+
+
+def _build_asset_guard_report(ctx: PipelineContext) -> dict[str, Any]:
+    layout_failed = str(ctx.layout_validation.get("status") or "") == "failed"
+    modules = ctx.modules
+    match_report = ctx.asset_match_report
+    slots = [
+        slot
+        for module in modules
+        for slot in (module.get("image_slots") or [])
+        if isinstance(slot, dict)
+    ]
+    required_slots = [
+        slot
+        for slot in slots
+        if bool(slot.get("required", True))
+        or str(slot.get("priority") or "").lower() == "high"
+    ]
+    matched_required = [
+        slot for slot in required_slots if str(slot.get("matched_asset") or "").strip()
+    ]
+    missing_required = [
+        slot for slot in required_slots if not str(slot.get("matched_asset") or "").strip()
+    ]
+    missing_roles = sorted(
+        {
+            str(slot.get("role") or slot.get("asset_type") or "detail")
+            for slot in missing_required
+            if str(slot.get("role") or slot.get("asset_type") or "detail") not in {"detail"}
+        }
+    )
+    missing_slot_ids = [
+        str(slot.get("id") or slot.get("slot_id") or "")
+        for slot in missing_required
+        if str(slot.get("id") or slot.get("slot_id") or "").strip()
+    ]
+    slot_count = int(match_report.get("slot_count") or len(slots))
+    match_count = int(match_report.get("match_count") or 0)
+    slot_match_rate = round(match_count / slot_count, 3) if slot_count else 0.0
+
+    issues: list[str] = []
+    warnings: list[str] = []
+    if layout_failed:
+        issues.append("Layout Guard / layout_validation 未通过，当前结果不能进入正式导出。")
+    if slot_count == 0:
+        issues.append("当前没有可验证的 image_slots，无法执行 Asset Guard。")
+    if missing_required:
+        issues.append(
+            "关键图片槽缺少素材："
+            + "、".join(missing_slot_ids[:6] or missing_roles[:6] or ["required_slots"])
+        )
+    elif match_report.get("status") == "warning":
+        warnings.append("存在非关键图片槽未命中，建议导出前继续补图。")
+    if str(match_report.get("status") or "") == "skipped":
+        warnings.append(str(match_report.get("reason") or "图片槽匹配未执行"))
+
+    status = "blocked" if issues else ("warning" if warnings else "passed")
+    return {
+        "status": status,
+        "can_export": not issues,
+        "error_code": _guard_error_code("asset_guard", status),
+        "issues": issues,
+        "warnings": warnings,
+        "slot_count": slot_count,
+        "match_count": match_count,
+        "slot_match_rate": slot_match_rate,
+        "required_slot_count": len(required_slots),
+        "matched_required_slot_count": len(matched_required),
+        "missing_required_slot_ids": missing_slot_ids,
+        "missing_required_asset_roles": missing_roles,
+        "recommended_actions": _asset_guard_action_items(
+            missing_roles,
+            missing_slot_ids,
+            layout_failed,
+            slot_count,
+        ),
+    }
+
+
+def _append_unique(items: list[str], values: list[str]) -> None:
+    for value in values:
+        text = str(value).strip()
+        if text and text not in items:
+            items.append(text)
+
+
+def _stage_preflight_signal(ctx: PipelineContext, stage_id: str) -> dict[str, Any]:
+    execution = (
+        ctx.stage_execution.get(stage_id)
+        if isinstance(ctx.stage_execution.get(stage_id), dict)
+        else {}
+    )
+    contract = (
+        ctx.stage_contracts.get(stage_id)
+        if isinstance(ctx.stage_contracts.get(stage_id), dict)
+        else {}
+    )
+    warnings: list[str] = []
+    warning_codes: list[str] = []
+    reasons: list[str] = []
+    reason_codes: list[str] = []
+    recommended_actions: list[str] = []
+    contract_status = str(contract.get("status") or "")
+    execution_status = str(execution.get("status") or "")
+    retry_summary = _retry_summary_payload(stage_id, contract)
+    error_code = str(
+        execution.get("error_code")
+        or contract.get("error_code")
+        or (_stage_contract_failure_code(stage_id) if contract_status == "failed" else "")
+    )
+    if contract_status == "failed":
+        reason_codes.append(f"{stage_id}_contract_failed")
+        reasons.append(f"{stage_id} 阶段结构校验未通过，当前结果来自回退逻辑。")
+        recommended_actions.append(f"修复 {stage_id} 阶段结构输出后重新生成。")
+    elif execution_status == "fallback":
+        warning_codes.append(f"{stage_id}_fallback_used")
+        warnings.append(f"{stage_id} 阶段使用回退结果，建议导出前人工复核。")
+        recommended_actions.append(f"复核 {stage_id} 阶段回退结果是否可接受。")
+    elif int(contract.get("retries_used") or 0) > 0:
+        warning_codes.append(f"{stage_id}_retried_before_passing")
+        warnings.append(
+            f"{stage_id} 阶段经过 {int(contract.get('retries_used') or 0)} 次重试后才通过结构校验。"
+        )
+    return {
+        "stage_id": stage_id,
+        "status": execution_status or contract_status or "unknown",
+        "execution_status": execution_status or "unknown",
+        "contract_status": contract_status or "unknown",
+        "started_at": str(execution.get("started_at") or ""),
+        "completed_at": str(execution.get("completed_at") or ""),
+        "duration_ms": int(execution.get("duration_ms") or execution.get("elapsed_ms") or 0),
+        "error_code": error_code,
+        "retry": retry_summary,
+        "contract_validation": dict(contract),
+        "reasons": reasons,
+        "reason_codes": reason_codes,
+        "warnings": warnings,
+        "warning_codes": warning_codes,
+        "recommended_actions": recommended_actions,
+    }
+
+
+def _build_export_preflight(ctx: PipelineContext) -> dict[str, Any]:
+    layout_status = str(ctx.layout_validation.get("status") or "failed")
+    asset_guard_status = str(ctx.asset_guard.get("status") or "blocked")
+    layout_schema_hit = bool(ctx.layout_validation.get("guard_can_execute"))
+    checks = {
+        "layout_validation": {
+            "status": layout_status,
+            "guard_can_execute": layout_schema_hit,
+            "error_code": str(ctx.layout_validation.get("error_code") or ""),
+        },
+        "asset_guard": {
+            "status": asset_guard_status,
+            "can_export": bool(ctx.asset_guard.get("can_export")),
+            "error_code": str(ctx.asset_guard.get("error_code") or ""),
+        },
+    }
+    reasons: list[str] = []
+    reason_codes: list[str] = []
+    warnings: list[str] = []
+    warning_codes: list[str] = []
+    recommended_actions: list[str] = list(ctx.asset_guard.get("recommended_actions") or [])
+    has_blocking_issue = False
+    has_review_only_issue = False
+
+    if not layout_schema_hit:
+        has_blocking_issue = True
+        _append_unique(reasons, ["未命中可执行 layout_schema，当前结果不能进入正式导出。"])
+        _append_unique(reason_codes, ["layout_schema_unavailable"])
+        _append_unique(recommended_actions, ["先补齐可执行 layout_schema 或修复布局协议。"])
+    if layout_status == "failed":
+        has_blocking_issue = True
+        _append_unique(
+            reasons,
+            [str(item) for item in ctx.layout_validation.get("issues", []) if str(item).strip()],
+        )
+        _append_unique(reason_codes, ["layout_validation_failed"])
+    elif layout_status == "warning":
+        has_review_only_issue = True
+        _append_unique(
+            warnings,
+            [str(item) for item in ctx.layout_validation.get("warnings", []) if str(item).strip()],
+        )
+        _append_unique(warning_codes, ["layout_validation_warning"])
+
+    if asset_guard_status == "blocked":
+        has_review_only_issue = True
+        _append_unique(
+            reasons,
+            [str(item) for item in ctx.asset_guard.get("issues", []) if str(item).strip()],
+        )
+        _append_unique(reason_codes, ["asset_guard_blocked"])
+    elif asset_guard_status == "warning":
+        has_review_only_issue = True
+        _append_unique(
+            warnings,
+            [str(item) for item in ctx.asset_guard.get("warnings", []) if str(item).strip()],
+        )
+        _append_unique(warning_codes, ["asset_guard_warning"])
+
+    stage_checks: dict[str, Any] = {}
+    for stage_id in ("image_generation", "copy"):
+        signal = _stage_preflight_signal(ctx, stage_id)
+        stage_checks[stage_id] = signal
+        if signal["reason_codes"]:
+            has_review_only_issue = True
+        if signal["warning_codes"]:
+            has_review_only_issue = True
+        _append_unique(reasons, list(signal["reasons"]))
+        _append_unique(reason_codes, list(signal["reason_codes"]))
+        _append_unique(warnings, list(signal["warnings"]))
+        _append_unique(warning_codes, list(signal["warning_codes"]))
+        _append_unique(recommended_actions, list(signal["recommended_actions"]))
+    checks["stage_contracts"] = stage_checks
+
+    if has_blocking_issue:
+        decision = "blocked"
+        status = "blocked"
+        error_code = "export_preflight_blocked"
+        message = "导出前检查未通过，当前结果只能输出诊断与审稿材料。"
+    elif has_review_only_issue:
+        decision = "review_only"
+        status = "warning"
+        error_code = "export_preflight_review_only"
+        message = "导出前检查存在风险，当前结果仅建议作为 review_only / 审稿包。"
+    else:
+        decision = "ready"
+        status = "passed"
+        error_code = ""
+        message = "导出前检查通过，允许进入正式导出。"
+
+    return {
+        "status": status,
+        "decision": decision,
+        "error_code": error_code,
+        "message": message,
+        "reason_codes": reason_codes[:12],
+        "warning_codes": warning_codes[:12],
+        "reasons": reasons[:12],
+        "warnings": warnings[:12],
+        "recommended_actions": recommended_actions[:8],
+        "checks": checks,
+    }
+
+
+def _build_result_state(ctx: PipelineContext) -> dict[str, Any]:
+    export_preflight = _build_export_preflight(ctx)
+    critical_stages = _critical_stage_payloads(ctx)
+    critical_checks = _critical_check_payloads(ctx, export_preflight)
+    layout_status = str(ctx.layout_validation.get("status") or "failed")
+    asset_guard_status = str(ctx.asset_guard.get("status") or "blocked")
+    layout_schema_hit = bool(ctx.layout_validation.get("guard_can_execute"))
+    image_slot_count = int(
+        ctx.layout_validation.get("image_slot_count")
+        or ctx.asset_match_report.get("slot_count")
+        or 0
+    )
+    slot_match_rate = (
+        round(
+            int(ctx.asset_match_report.get("match_count") or 0)
+            / int(ctx.asset_match_report.get("slot_count") or 1),
+            3,
+        )
+        if int(ctx.asset_match_report.get("slot_count") or 0)
+        else 0.0
+    )
+
+    reasons = [str(item) for item in export_preflight.get("reasons", []) if str(item).strip()]
+    warnings = [str(item) for item in export_preflight.get("warnings", []) if str(item).strip()]
+    decision = str(export_preflight.get("decision") or "review_only")
+
+    if decision == "blocked":
+        tier = "方向稿"
+        tier_code = "directional_draft"
+        delivery_status = "blocked"
+    elif decision == "review_only":
+        tier = "低保真草稿"
+        tier_code = "low_fidelity_draft"
+        delivery_status = "review_only"
+    else:
+        tier = "可执行设计稿"
+        tier_code = "executable_design"
+        delivery_status = "ready"
+
+    return {
+        "tier": tier,
+        "tier_code": tier_code,
+        "delivery_status": delivery_status,
+        "fallback_used": delivery_status != "ready",
+        "layout_schema_hit": layout_schema_hit,
+        "layout_validation_status": layout_status,
+        "asset_guard_status": asset_guard_status,
+        "image_slot_count": image_slot_count,
+        "slot_match_rate": slot_match_rate,
+        "reasons": reasons[:10],
+        "reason_codes": list(export_preflight.get("reason_codes") or [])[:10],
+        "warnings": warnings[:10],
+        "warning_codes": list(export_preflight.get("warning_codes") or [])[:10],
+        "error_code": str(export_preflight.get("error_code") or ""),
+        "recommended_actions": list(export_preflight.get("recommended_actions") or [])[:6],
+        "export_preflight": export_preflight,
+        "critical_stages": critical_stages,
+        "critical_checks": critical_checks,
+    }
+
+
+def _normalize_note_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for raw in value:
+        text = str(raw).strip()
+        if text and text not in items:
+            items.append(text)
+    return items
+
+
+def _build_psd_stage_payload(
+    ctx: PipelineContext,
+    notes: list[str],
+    risks: list[str],
+    layer_naming: list[str],
+    editability_checks: list[str],
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "layer_tree": ctx.psd_layers,
+        "notes": notes,
+        "risks": risks,
+        "layer_naming": layer_naming,
+        "editability_checks": editability_checks,
+        "asset_guard": ctx.asset_guard,
+        "result_state_preview": _build_result_state(ctx),
+        "json_contract": {
+            "version": "figma_psd_stage.v2",
+            "stable_keys": [
+                "layer_tree",
+                "notes",
+                "risks",
+                "layer_naming",
+                "editability_checks",
+                "asset_guard",
+                "result_state_preview",
+                "json_contract",
+                "source",
+            ],
+            "source": source,
+        },
+        "source": source,
+    }
+
+
+def _export_review_payload(ctx: PipelineContext, result_state: dict[str, Any]) -> dict[str, Any]:
+    delivery_status = str(result_state.get("delivery_status") or "review_only")
+    preflight = (
+        result_state.get("export_preflight")
+        if isinstance(result_state.get("export_preflight"), dict)
+        else _build_export_preflight(ctx)
+    )
+    if delivery_status == "ready":
+        status = "ready_for_export"
+        message = str(preflight.get("message") or "结构与关键素材已通过守门，允许进入正式导出。")
+    elif delivery_status == "review_only":
+        status = "review_only"
+        message = str(preflight.get("message") or "当前结果仅建议作为低保真草稿 / 审稿包，不建议直接交付正式设计稿。")
+    else:
+        status = "blocked"
+        message = str(preflight.get("message") or "当前结果被 Guard 阻断，只能输出诊断与审稿材料。")
+    return {
+        "status": status,
+        "message": message,
+        "error_code": str(preflight.get("error_code") or ""),
+        "result_tier": result_state.get("tier"),
+        "blocking_reasons": result_state.get("reasons", []),
+        "reason_codes": list(result_state.get("reason_codes") or []),
+        "warning_codes": list(result_state.get("warning_codes") or []),
+        "recommended_actions": result_state.get("recommended_actions", []),
+        "checks": preflight.get("checks", {}),
+        "critical_stages": result_state.get("critical_stages", {}),
+        "critical_checks": result_state.get("critical_checks", {}),
+    }
+
+
 def stage_image_generation(ctx: PipelineContext) -> StageResult:
     req = ctx.request
+    layout_schema = _resolve_layout_schema(ctx)
+    slot_items = _slot_prompt_items(layout_schema)
+    expected_image_count = (
+        len(
+            [
+                item
+                for item in slot_items
+                if str(item.get("role") or item.get("section_role") or "")
+                not in {"brand_story", "cta", "interaction"}
+            ]
+        )
+        if slot_items
+        else len(
+            [
+                item
+                for item in ctx.layout_blueprint
+                if str(item.get("role") or "") not in {"brand_story", "cta"}
+            ]
+        )
+    )
 
     def default_images() -> list[dict[str, Any]]:
         generated: list[dict[str, Any]] = []
+        if slot_items:
+            for index, slot in enumerate(slot_items, start=1):
+                role = str(slot.get("role") or slot.get("section_role") or "detail")
+                if role in ("brand_story", "cta", "interaction"):
+                    continue
+                generated.append(
+                    {
+                        "name": f"generated_{index:02d}_{role}_{slot.get('slot_id') or 'slot'}.svg",
+                        "slot_id": slot.get("slot_id"),
+                        "section_id": slot.get("section_id"),
+                        "module_index": index,
+                        "module_name": slot.get("section_name") or slot.get("section_role") or role,
+                        "role": role,
+                        "image_role": slot.get("role") or role,
+                        "source": "generated_placeholder",
+                        "prompt": f"{req.brand_name} {req.product_name} {slot.get('section_name') or role} {slot.get('role') or '配图'}",
+                    }
+                )
+            return generated
         for index, item in enumerate(ctx.layout_blueprint, start=1):
             if item.get("role") in ("brand_story", "cta"):
                 continue
@@ -1326,25 +2874,46 @@ def stage_image_generation(ctx: PipelineContext) -> StageResult:
         return generated
 
     def model_fn() -> dict[str, Any]:
+        prompt_payload = {
+            "brand": req.brand_name,
+            "product": req.product_name,
+            "design_direction": {
+                "direction": ctx.design_direction.get("direction"),
+                "information_architecture": ctx.design_direction.get("information_architecture"),
+            },
+            "slot_plan": slot_items[:48],
+            "layout_blueprint": ctx.layout_blueprint if not slot_items else [],
+            "available_assets": {
+                "product_images": ctx.images,
+                "reference_images": ctx.reference_images,
+            },
+            "constraints": _constraint_prompt_payload(ctx),
+        }
         prompt = (
-            f"品牌：{req.brand_name}\n"
-            f"商品：{req.product_name}\n"
-            f"页面规划：{json.dumps(ctx.design_direction, ensure_ascii=False)}\n"
-            f"模块蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
-            f"已有商品图：{ctx.images}\n"
-            f"参考图：{ctx.reference_images}\n\n"
-            f"{_constraint_prompt_block(ctx)}"
-            "请输出 images 数组，每个元素包含："
-            "name, module_index, module_name, role, image_role, source, prompt。"
-            "source 取值建议为 ai_generated 或 reference_derived。"
+            "请根据以下结构化图片槽计划输出 images 数组。要求：\n"
+            "1. 若存在 slot_plan，优先按 slot 逐一规划，不要只按模块粗略生成。\n"
+            "2. 每个元素包含：name, slot_id, section_id, module_index, module_name, role, image_role, source, prompt。\n"
+            "3. source 取值建议为 ai_generated 或 reference_derived。\n"
+            "4. 同一高优先级 slot 不要复用完全相同的 prompt。\n\n"
+            f"{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}"
         )
-        data = ctx.llm.invoke_json(req.prompts.design_agent_prompt, prompt)
-        images = data.get("images")
-        if not isinstance(images, list) or not images:
-            raise LLMUnavailable("图片生成阶段未返回 images 数组")
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="image_generation",
+            base_prompt=prompt,
+            invoke_model=lambda attempt_prompt: {
+                **ctx.llm.invoke_json(req.prompts.design_agent_prompt, attempt_prompt),
+                "_slot_plan": slot_items,
+                "_expected_image_count": expected_image_count,
+                "_require_slot_bindings": bool(slot_items),
+            },
+        )
+        images = data.get("images") or []
         ctx.generated_images = [
             {
                 "name": str(item.get("name") or f"generated_{idx + 1:02d}.svg"),
+                "slot_id": str(item.get("slot_id") or ""),
+                "section_id": str(item.get("section_id") or ""),
                 "module_index": int(item.get("module_index") or idx + 1),
                 "module_name": str(item.get("module_name") or ""),
                 "role": str(item.get("role") or ""),
@@ -1355,7 +2924,10 @@ def stage_image_generation(ctx: PipelineContext) -> StageResult:
             for idx, item in enumerate(images)
             if isinstance(item, dict)
         ] or default_images()
-        return {"images": ctx.generated_images}
+        return {
+            "images": ctx.generated_images,
+            "_contract_validation": dict(data.get("_contract_validation") or {}),
+        }
 
     def fallback_fn() -> dict[str, Any]:
         ctx.generated_images = default_images()
@@ -1379,12 +2951,22 @@ def stage_image_generation(ctx: PipelineContext) -> StageResult:
 def stage_copy(ctx: PipelineContext) -> StageResult:
     req = ctx.request
     module_names = [m["name"] for m in ctx.modules]
+    module_contracts = [
+        {
+            "name": str(module.get("name") or f"模块{index + 1}"),
+            "role": str(module.get("role") or ""),
+            "required_text_fields": _required_text_fields_for_role(
+                str(module.get("role") or "")
+            ),
+        }
+        for index, module in enumerate(ctx.modules)
+    ]
 
     def model_fn() -> dict[str, Any]:
-        prompt = (
+        base_prompt = (
             f"品牌：{req.brand_name}，商品：{req.product_name}\n"
             f"卖点：{ctx.structured_info.get('selling_points')}\n"
-            f"brief：\n{req.product_brief}\n"
+            f"{_input_prompt_block(ctx)}"
             f"模块列表：{module_names}\n\n"
             f"{_constraint_prompt_block(ctx)}"
             "请为每个模块生成文案，输出 blocks 为数组，"
@@ -1392,12 +2974,22 @@ def stage_copy(ctx: PipelineContext) -> StageResult:
             "headline(主标题), subtitle(副标题), body(短说明), points(要点数组)。"
             "文案必须基于 brief，不夸大、不使用绝对化或平台风险词。"
         )
-        data = ctx.llm.invoke_json(req.prompts.copy_agent_prompt, prompt)
-        blocks = data.get("blocks")
-        if not isinstance(blocks, list) or not blocks:
-            raise LLMUnavailable("文案 Agent 未返回 blocks 数组")
+        data = _invoke_stage_json_with_retry(
+            ctx=ctx,
+            stage_id="copy",
+            base_prompt=base_prompt,
+            invoke_model=lambda attempt_prompt: {
+                **ctx.llm.invoke_json(req.prompts.copy_agent_prompt, attempt_prompt),
+                "_expected_block_count": len(ctx.modules),
+                "_module_contracts": module_contracts,
+            },
+        )
+        blocks = data.get("blocks") or []
         _apply_copy(ctx, blocks)
-        return {"blocks": [m["copy"] for m in ctx.modules]}
+        return {
+            "blocks": [m["copy"] for m in ctx.modules],
+            "_contract_validation": dict(data.get("_contract_validation") or {}),
+        }
 
     def fallback_fn() -> dict[str, Any]:
         points = _selling_points(ctx)
@@ -1476,29 +3068,72 @@ def stage_psd(ctx: PipelineContext) -> StageResult:
         return layers
 
     def model_fn() -> dict[str, Any]:
+        if str(ctx.asset_guard.get("status") or "") == "blocked":
+            raise LLMUnavailable("Asset Guard 未通过，Figma / PSD 阶段仅输出审稿包结构")
         # 设计稿阶段以确定性结构为主，模型只补充命名建议与注意事项。
         prompt = (
             f"模块与文案：{json.dumps([{'name': m['name'], 'copy': m['copy']} for m in ctx.modules], ensure_ascii=False)}\n\n"
+            f"布局校验：{json.dumps(ctx.layout_validation, ensure_ascii=False)}\n"
+            f"素材守门：{json.dumps(ctx.asset_guard, ensure_ascii=False)}\n\n"
             f"{_constraint_prompt_block(ctx)}"
-            "请输出 Figma / PSD 生产说明，字段 notes(数组，图层命名、组件映射与可编辑性注意事项)。"
+            "请输出 Figma / PSD 生产说明，字段："
+            "notes(数组)，risks(数组)，layer_naming(数组)，editability_checks(数组)。"
         )
         data = ctx.llm.invoke_json(req.prompts.psd_agent_prompt, prompt)
         ctx.psd_layers = build_layers()
-        return {"layer_tree": ctx.psd_layers, "notes": data.get("notes", [])}
+        notes = _normalize_note_list(data.get("notes")) or [
+            "所有文字保持可编辑文本层，不要转曲。",
+            "图片与占位图层保持独立命名，避免合并到背景。",
+        ]
+        risks = _normalize_note_list(data.get("risks"))
+        layer_naming = _normalize_note_list(data.get("layer_naming")) or [
+            "模块分组统一使用 01_Hero / 02_Feature 这类稳定编号。",
+            "图片图层统一使用 IMG_ 前缀，文本图层统一使用 TXT_ 前缀。",
+        ]
+        editability_checks = _normalize_note_list(data.get("editability_checks")) or [
+            "检查主标题、副标题、正文和要点仍为文字层。",
+            "检查每个模块图片槽都可被设计师直接替换。",
+        ]
+        return _build_psd_stage_payload(
+            ctx,
+            notes,
+            risks,
+            layer_naming,
+            editability_checks,
+            "model_augmented",
+        )
 
     def fallback_fn() -> dict[str, Any]:
         ctx.psd_layers = build_layers()
-        return {
-            "layer_tree": ctx.psd_layers,
-            "notes": [
-                "所有文字保留为可编辑文字图层",
-                "图片独立成层，命名以 IMG_ 前缀",
-                "每个模块独立分组，分组名带序号",
+        notes = [
+            "所有文字保留为可编辑文字图层",
+            "图片独立成层，命名以 IMG_ 前缀",
+            "每个模块独立分组，分组名带序号",
+        ]
+        if str(ctx.asset_guard.get("status") or "") == "blocked":
+            notes.insert(0, "Asset Guard 未通过：当前仅输出审稿用结构，不建议直接正式导出。")
+        return _build_psd_stage_payload(
+            ctx,
+            notes,
+            [],
+            [
+                "模块分组统一带序号，便于 Figma / PSD 双端复用。",
+                "图片槽优先继承 schema_absolute / image_slots 坐标。",
             ],
-        }
+            [
+                "文字图层保持可编辑。",
+                "图片槽与背景层不要合并。",
+            ],
+            "deterministic_fallback",
+        )
 
     def summarize(data: dict[str, Any], used: bool) -> str:
-        return f"已规划 {len(data.get('layer_tree', []))} 个 Figma Frame / PSD 图层分组，文字层全部可编辑。"
+        asset_status = str((data.get("asset_guard") or {}).get("status") or "unknown")
+        suffix = "，当前仅建议审稿" if asset_status == "blocked" else ""
+        return (
+            f"已规划 {len(data.get('layer_tree', []))} 个 Figma Frame / PSD 图层分组，"
+            f"文字层全部可编辑，Asset Guard={asset_status}{suffix}。"
+        )
 
     return _run_stage(
         "figma_psd", "Figma / PSD 生成 Agent", "file-image", ctx, model_fn, fallback_fn, summarize
@@ -1509,11 +3144,21 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
     ctx.check_cancelled("design_score:before")
     req = ctx.request
     started = time.perf_counter()
+    started_at = datetime.utcnow()
     set_run_state(ctx.run_id, "running", "design_score", "Design Score", "check-circle")
     _workflow_log(ctx.run_id, "开始阶段：Design Score (design_score)")
     module_count = len(ctx.modules)
     brand_constraints = len(ctx.design_direction.get("brand_constraints", []))
     asset_penalty = 0 if ctx.images else 6
+    layout_schema_hit = bool(ctx.layout_validation.get("guard_can_execute"))
+    slot_count = int(
+        ctx.asset_match_report.get("slot_count")
+        or ctx.layout_validation.get("image_slot_count")
+        or 0
+    )
+    match_count = int(ctx.asset_match_report.get("match_count") or 0)
+    slot_match_rate = round(match_count / slot_count, 3) if slot_count else 0.0
+    result_preview = _build_result_state(ctx)
     score = {
         "brand_match": min(96, 84 + brand_constraints * 3),
         "layout_quality": min(94, 82 + module_count),
@@ -1525,44 +3170,81 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
         score["layout_quality"] = min(98, score["layout_quality"] + 5)
     elif ctx.layout_validation.get("status") == "failed":
         score["layout_quality"] = max(60, score["layout_quality"] - 24)
+    elif ctx.layout_validation.get("status") == "warning":
+        score["layout_quality"] = max(66, score["layout_quality"] - 8)
+    if not layout_schema_hit:
+        score["layout_quality"] = max(60, score["layout_quality"] - 12)
     if ctx.asset_match_report.get("status") == "passed" and ctx.asset_match_report.get("slot_count"):
         score["visual_consistency"] = min(98, score["visual_consistency"] + 4)
     elif ctx.asset_match_report.get("unmatched_slots"):
         score["visual_consistency"] = max(60, score["visual_consistency"] - 8)
+    if str(ctx.asset_guard.get("status") or "") == "blocked":
+        score["visual_consistency"] = max(60, score["visual_consistency"] - 16)
+        score["conversion_score"] = max(60, score["conversion_score"] - 10)
+    elif str(ctx.asset_guard.get("status") or "") == "warning":
+        score["visual_consistency"] = max(60, score["visual_consistency"] - 6)
     golden_reference_count = len([name for name in ctx.reference_images if any(token in name.lower() for token in ("长图", "golden", "reference", "案例"))])
     golden_alignment = min(96, 78 + module_count * 2 + golden_reference_count * 8)
     if ctx.layout_validation.get("status") == "failed":
         golden_alignment = max(60, golden_alignment - 24)
     if ctx.asset_match_report.get("status") in {"skipped", "warning"}:
         golden_alignment = max(60, golden_alignment - 8)
+    if not layout_schema_hit:
+        golden_alignment = max(60, golden_alignment - 10)
     score["golden_case_alignment"] = golden_alignment
     score = {key: max(60, value - asset_penalty) for key, value in score.items()}
     overall = round(sum(score.values()) / len(score), 1)
     ctx.design_score = {
         **score,
         "overall": overall,
+        "metrics": {
+            "layout_schema_hit": layout_schema_hit,
+            "fallback_used": bool(result_preview.get("fallback_used")),
+            "layout_validation_status": ctx.layout_validation.get("status"),
+            "image_slot_count": slot_count,
+            "slot_match_rate": slot_match_rate,
+            "asset_guard_status": ctx.asset_guard.get("status"),
+            "result_tier_preview": result_preview.get("tier"),
+        },
         "explain": [
             "评分用于给设计负责人提供可解释审核依据，不替代人工判断。",
             "品牌匹配优先参考 Core Rule、Derived Rule 与当前页面模板。",
-            "缺少商品实拍或场景素材时，视觉一致性和转化评分会被扣分。",
+            "layout_schema 未命中或 Layout Guard 失败时，布局质量和黄金案例贴合度会显著下降。",
+            "Asset Guard 未通过或关键图片槽未命中时，视觉一致性和转化评分会被扣分。",
             "黄金案例匹配优先参考可执行 Layout Schema、图片槽命中率和参考案例输入。",
         ],
         "layout_validation": ctx.layout_validation,
         "asset_match_report": ctx.asset_match_report,
+        "asset_guard": ctx.asset_guard,
+        "result_state_preview": result_preview,
         "blocking_issues": [
             *([] if overall >= 85 else ["建议补充高质量商品图后再导出正式设计稿"]),
             *ctx.layout_validation.get("issues", []),
+            *ctx.asset_guard.get("issues", []),
             *[f"缺少图片槽素材：{item.get('slot_id') or item.get('role')}" for item in ctx.asset_match_report.get("unmatched_slots", [])[:5]],
         ],
     }
     summary = f"综合评分 {overall}，品牌匹配 {ctx.design_score['brand_match']}，布局质量 {ctx.design_score['layout_quality']}。"
     ctx.report_parts.append(f"## Design Score\n{summary}")
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    completed_at = datetime.utcnow()
     _workflow_log(
         ctx.run_id,
         f"结束阶段：Design Score (design_score)，status=completed，used_model=False，elapsed_ms={elapsed_ms}，summary={summary}",
         ctx.design_score,
     )
+    ctx.stage_execution["design_score"] = {
+        "status": "completed",
+        "used_model": False,
+        "summary": summary,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "duration_ms": elapsed_ms,
+        "error_code": "",
+        "retry": {},
+        "error": {},
+        "contract_validation": {},
+    }
     result = StageResult(
         id="design_score",
         title="Design Score",
@@ -1573,6 +3255,11 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
         data=ctx.design_score,
         used_model=False,
         elapsed_ms=elapsed_ms,
+        started_at=started_at.isoformat(),
+        completed_at=completed_at.isoformat(),
+        duration_ms=elapsed_ms,
+        error_code="",
+        retry={},
     )
     append_stage_result(ctx.run_id, result)
     ctx.check_cancelled("design_score:after")
@@ -1583,6 +3270,7 @@ def stage_outputs(ctx: PipelineContext) -> StageResult:
     ctx.check_cancelled("output_review:before")
     req = ctx.request
     started = time.perf_counter()
+    started_at = datetime.utcnow()
     set_run_state(ctx.run_id, "running", "output_review", "输出、审核与反馈", "check-circle")
     _workflow_log(ctx.run_id, "开始阶段：输出、审核与反馈 (output_review)")
     output_labels = {
@@ -1600,26 +3288,51 @@ def stage_outputs(ctx: PipelineContext) -> StageResult:
         "版式质量：是否接近参考图风格、是否美观",
         "文案准确性：是否与 brief 一致、是否有夸大",
         "Figma/PSD 可编辑性：图层是否清晰、文字是否可编辑",
+        "Asset Guard：关键图片槽是否都有明确素材命中",
     ]
+    ctx.result_state = _build_result_state(ctx)
+    export_review = _export_review_payload(ctx, ctx.result_state)
     ctx.outputs = {
         "produced": produced,
         "review_checklist": review_checklist,
+        "result_state": ctx.result_state,
+        "export_review": export_review,
         "feedback_capture": {
             "tracked_changes": ["模块隐藏/删除", "字体字号调整", "颜色调整", "文案修改", "图片替换"],
             "learning_policy": "本阶段只记录设计师修改，不自动强化学习、不自动覆盖品牌规则。",
             "effective_constraints": ctx.effective_constraints,
             "feedback_constraints": ctx.feedback_constraints,
         },
-        "next_step": "进入人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。",
+        "next_step": (
+            "进入正式导出与人工审核：设计师初审 → 运营/品牌方审核 → 记录反馈 → 交付上线。"
+            if export_review["status"] == "ready_for_export"
+            else "先补结构 / 素材缺口，再进行设计师初审与二次生成。"
+        ),
     }
-    summary = f"已产出：{'、'.join(produced)}；下一步进入人工审核并记录设计反馈。"
+    summary = (
+        f"已产出：{'、'.join(produced)}；当前结果等级：{ctx.result_state.get('tier')}；"
+        f"导出判定：{export_review['status']}。"
+    )
     ctx.report_parts.append(f"## 输出、审核与反馈\n{summary}")
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    completed_at = datetime.utcnow()
     _workflow_log(
         ctx.run_id,
         f"结束阶段：输出、审核与反馈 (output_review)，status=completed，used_model=False，elapsed_ms={elapsed_ms}，summary={summary}",
         ctx.outputs,
     )
+    ctx.stage_execution["output_review"] = {
+        "status": "completed",
+        "used_model": False,
+        "summary": summary,
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "duration_ms": elapsed_ms,
+        "error_code": str(ctx.result_state.get("error_code") or ""),
+        "retry": {},
+        "error": {},
+        "contract_validation": {},
+    }
     result = StageResult(
         id="output_review",
         title="输出、审核与反馈",
@@ -1630,6 +3343,11 @@ def stage_outputs(ctx: PipelineContext) -> StageResult:
         data=ctx.outputs,
         used_model=False,
         elapsed_ms=elapsed_ms,
+        started_at=started_at.isoformat(),
+        completed_at=completed_at.isoformat(),
+        duration_ms=elapsed_ms,
+        error_code=str(ctx.result_state.get("error_code") or ""),
+        retry={},
     )
     append_stage_result(ctx.run_id, result)
     ctx.check_cancelled("output_review:after")
@@ -1659,8 +3377,14 @@ def run_pipeline(
     feedback_constraints: dict[str, Any] | None = None,
 ) -> tuple[list[StageResult], PipelineContext]:
     reset_run(run_id or "local")
+    input_layers = build_input_layers(request.product_brief, assets)
     try:
-        database.persist_run_started(run_id or "local", request, assets)
+        database.persist_run_started(
+            run_id or "local",
+            request,
+            assets,
+            input_layers=input_layers,
+        )
     except Exception as exc:
         print(f"[DB] persist_run_started failed: {exc}", flush=True)
     ctx = PipelineContext(
@@ -1674,6 +3398,7 @@ def run_pipeline(
         requirement_constraints=request.requirement_constraints.model_dump(),
         feedback_constraints=dict(feedback_constraints or {}),
     )
+    ctx.input_layers = input_layers
     ctx.effective_constraints = _merge_effective_constraints(
         ctx.requirement_constraints,
         ctx.feedback_constraints,
@@ -1697,6 +3422,13 @@ def run_pipeline(
             "requirement_constraints": ctx.requirement_constraints,
             "feedback_constraints": ctx.feedback_constraints,
             "effective_constraints": ctx.effective_constraints,
+            "input_layers": {
+                "brief_asset_count": ctx.input_layers.get("brief_asset_count", 0),
+                "wireframe_asset_count": ctx.input_layers.get("wireframe_asset_count", 0),
+                "brief_summary": ctx.input_layers.get("brief_summary", ""),
+                "layout_reference": ctx.input_layers.get("layout_reference", ""),
+                "raw_wireframe_dump": ctx.input_layers.get("raw_wireframe_dump", ""),
+            },
         },
     )
     stages = [stage(ctx) for stage in PIPELINE_STAGES]

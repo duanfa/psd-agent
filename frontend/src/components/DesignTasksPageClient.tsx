@@ -6,6 +6,7 @@ import {
   fetchDesignTasksPageWithFilters,
   type DesignTasksPageResponse,
 } from "@/lib/api";
+import { WorkflowResultStateEntrySummary } from "./WorkflowResultStateEntrySummary";
 
 function statusClass(status: string) {
   if (status.includes("completed") || status.includes("成功")) return "success";
@@ -52,11 +53,15 @@ export function DesignTasksPageClient({ initialData }: { initialData: DesignTask
   const [error, setError] = useState<string | null>(null);
   const searchTimer = useRef<number | null>(null);
 
-  const loadData = async (nextFilters: FiltersState) => {
+  const loadData = async (nextFilters: FiltersState, nextOffset = 0) => {
     setLoading(true);
     setError(null);
     try {
-      const next = await fetchDesignTasksPageWithFilters(nextFilters);
+      const next = await fetchDesignTasksPageWithFilters({
+        ...nextFilters,
+        limit: data.pagination.limit,
+        offset: nextOffset,
+      });
       setData(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -71,12 +76,17 @@ export function DesignTasksPageClient({ initialData }: { initialData: DesignTask
     if ("search" in patch) {
       if (searchTimer.current) window.clearTimeout(searchTimer.current);
       searchTimer.current = window.setTimeout(() => {
-        void loadData(next);
+        void loadData(next, 0);
       }, 250);
       return;
     }
-    void loadData(next);
+    void loadData(next, 0);
   };
+
+  const pageStart = data.tasks.length ? data.pagination.offset + 1 : 0;
+  const pageEnd = data.pagination.offset + data.tasks.length;
+  const canPreviousPage = data.pagination.offset > 0;
+  const canNextPage = data.pagination.hasMore;
 
   useEffect(() => {
     return () => {
@@ -162,6 +172,7 @@ export function DesignTasksPageClient({ initialData }: { initialData: DesignTask
                 <th>商品</th>
                 <th>任务类型</th>
                 <th>状态</th>
+                <th>结果摘要</th>
                 <th>创建时间</th>
                 <th>完成时间</th>
               </tr>
@@ -183,19 +194,56 @@ export function DesignTasksPageClient({ initialData }: { initialData: DesignTask
                         {statusLabel(item.status)}
                       </span>
                     </td>
+                    <td className="task-summary-cell">
+                      <WorkflowResultStateEntrySummary
+                        runId={item.runId}
+                        summary={item.resultSummary}
+                        fallbackSummary={item.summary}
+                      />
+                    </td>
                     <td>{formatTime(item.createdAt)}</td>
                     <td>{formatTime(item.completedAt)}</td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td className="table-empty" colSpan={7}>
+                  <td className="table-empty" colSpan={8}>
                     {loading ? "正在加载任务..." : "没有匹配的任务结果。"}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+        <div className="split-line" style={{ marginTop: 16 }}>
+          <div className="muted-text">
+            {data.pagination.total
+              ? `显示第 ${pageStart}-${pageEnd} 条，共 ${data.pagination.total} 条`
+              : "当前没有匹配任务"}
+          </div>
+          <div className="button-row">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() =>
+                void loadData(
+                  filters,
+                  Math.max(0, data.pagination.offset - data.pagination.limit),
+                )
+              }
+              disabled={loading || !canPreviousPage}
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void loadData(filters, data.pagination.offset + data.pagination.limit)}
+              disabled={loading || !canNextPage}
+            >
+              下一页
+            </button>
+          </div>
         </div>
       </section>
     </div>

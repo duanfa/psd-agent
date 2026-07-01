@@ -37,6 +37,11 @@
 
 合并顺序：内置默认 → `workflow-defaults.json` → `workflow-defaults.local.json` → 请求体。
 
+## 路线图
+
+- `docs/system-optimization-roadmap.md`：基于 VEJA 详情页日志复盘整理的系统层优化方案，包含 `layout_schema`、`image_slots`、阶段校验、Layout Guard、素材匹配和前端结果态升级等改造方向。
+- `docs/system-optimization-tasks.md`：将系统优化路线图进一步拆成 `Epic / Issue / 验收标准` 的可执行任务清单，适合直接排期或建 issue。
+
 ## 启动后端
 
 ```bash

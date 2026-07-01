@@ -13,6 +13,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    case,
     DateTime,
     ForeignKey,
     Integer,
@@ -29,6 +30,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from .defaults import load_workflow_defaults
+from .input_layers import build_input_layers, detail_input_layers, normalize_input_layers
+from .models import normalize_layout_schema_payload, validate_layout_schema_payload
 
 try:
     from dotenv import load_dotenv
@@ -283,6 +286,10 @@ class WorkflowStage(Base):
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     used_model: Mapped[bool] = mapped_column(Boolean, default=False)
     elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    retry: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -321,6 +328,15 @@ class WorkflowArtifact(Base):
     export_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     export_mode: Mapped[str | None] = mapped_column(String(64), nullable=True)
     export_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_metadata: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    result_tier: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tier_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    reason_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    warning_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    export_preflight: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    export_review: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     editable_html: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     readme: Mapped[str] = mapped_column(String(1024))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -386,9 +402,70 @@ def _ensure_schema_upgrades() -> None:
             artifact_statements.append(
                 "ALTER TABLE workflow_artifacts ADD COLUMN export_error LONGTEXT NULL"
             )
+        if "output_metadata" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN output_metadata VARCHAR(1024) NULL"
+            )
+        if "result_tier" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN result_tier VARCHAR(64) NULL"
+            )
+        if "tier_code" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN tier_code VARCHAR(64) NULL"
+            )
+        if "delivery_status" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN delivery_status VARCHAR(64) NULL"
+            )
+        if "error_code" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN error_code VARCHAR(128) NULL"
+            )
+        if "reason_codes" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN reason_codes JSON NULL"
+            )
+        if "warning_codes" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN warning_codes JSON NULL"
+            )
+        if "export_preflight" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN export_preflight JSON NULL"
+            )
+        if "export_review" not in artifact_existing:
+            artifact_statements.append(
+                "ALTER TABLE workflow_artifacts ADD COLUMN export_review JSON NULL"
+            )
         if artifact_statements:
             with engine.begin() as connection:
                 for statement in artifact_statements:
+                    connection.execute(text(statement))
+    if "workflow_stages" in table_names:
+        stage_existing = {
+            column["name"] for column in inspector.get_columns("workflow_stages")
+        }
+        stage_statements: list[str] = []
+        if "started_at" not in stage_existing:
+            stage_statements.append(
+                "ALTER TABLE workflow_stages ADD COLUMN started_at DATETIME NULL"
+            )
+        if "completed_at" not in stage_existing:
+            stage_statements.append(
+                "ALTER TABLE workflow_stages ADD COLUMN completed_at DATETIME NULL"
+            )
+        if "error_code" not in stage_existing:
+            stage_statements.append(
+                "ALTER TABLE workflow_stages ADD COLUMN error_code VARCHAR(128) NULL"
+            )
+        if "retry" not in stage_existing:
+            stage_statements.append(
+                "ALTER TABLE workflow_stages ADD COLUMN retry JSON NULL"
+            )
+        if stage_statements:
+            with engine.begin() as connection:
+                for statement in stage_statements:
                     connection.execute(text(statement))
     if "brand_assets" in table_names:
         asset_existing = {
@@ -476,12 +553,21 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def persist_run_started(run_id: str, request: Any, assets: list[Any]) -> None:
+def persist_run_started(
+    run_id: str,
+    request: Any,
+    assets: list[Any],
+    input_layers: Mapping[str, Any] | None = None,
+) -> None:
     with session_scope() as session:
         if session is None:
             return
 
         payload = _jsonable(request)
+        if isinstance(payload, dict):
+            normalized_layers = normalize_input_layers(input_layers)
+            if normalized_layers:
+                payload["input_layers"] = _jsonable(normalized_layers)
         run = session.get(WorkflowRun, run_id) or WorkflowRun(run_id=run_id, status="running")
         run.status = "running"
         run.current_stage = None
@@ -571,6 +657,18 @@ def persist_stage(run_id: str, stage: Any) -> None:
         stage_row.data = data.get("data") or {}
         stage_row.used_model = bool(data.get("used_model"))
         stage_row.elapsed_ms = int(data.get("elapsed_ms") or 0)
+        stage_row.started_at = (
+            datetime.fromisoformat(data["started_at"])
+            if data.get("started_at")
+            else None
+        )
+        stage_row.completed_at = (
+            datetime.fromisoformat(data["completed_at"])
+            if data.get("completed_at")
+            else None
+        )
+        stage_row.error_code = str(data.get("error_code") or "")
+        stage_row.retry = data.get("retry") or {}
         stage_row.updated_at = datetime.utcnow()
         session.merge(stage_row)
 
@@ -582,7 +680,7 @@ def persist_run_completed(
     used_deepagents: bool,
     agent_report: str,
     design_spec: dict[str, Any],
-    artifact_paths: dict[str, str],
+    artifact_paths: dict[str, Any],
     output_dir: str,
     warnings: list[str],
 ) -> None:
@@ -612,10 +710,397 @@ def persist_run_completed(
                 export_status=artifact_paths.get("export_status"),
                 export_mode=artifact_paths.get("export_mode"),
                 export_error=artifact_paths.get("export_error"),
+                output_metadata=artifact_paths.get("output_metadata"),
+                result_tier=artifact_paths.get("result_tier"),
+                tier_code=artifact_paths.get("tier_code"),
+                delivery_status=artifact_paths.get("delivery_status"),
+                error_code=artifact_paths.get("error_code"),
+                reason_codes=_jsonable(artifact_paths.get("reason_codes") or []),
+                warning_codes=_jsonable(artifact_paths.get("warning_codes") or []),
+                export_preflight=_jsonable(artifact_paths.get("export_preflight") or {}),
+                export_review=_jsonable(artifact_paths.get("export_review") or {}),
                 editable_html=artifact_paths.get("editable_html"),
                 readme=artifact_paths["readme"],
             )
         )
+
+
+def _extract_design_spec_state(design_spec: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    spec = design_spec if isinstance(design_spec, dict) else {}
+    result_state = spec.get("result_state") if isinstance(spec.get("result_state"), dict) else {}
+    export_review = spec.get("export_review") if isinstance(spec.get("export_review"), dict) else {}
+    return result_state, export_review
+
+
+def _artifact_result_state(artifact: WorkflowArtifact | None) -> dict[str, Any]:
+    if artifact is None:
+        return {}
+    return {
+        "tier": artifact.result_tier or "",
+        "tier_code": artifact.tier_code or "",
+        "delivery_status": artifact.delivery_status or "",
+        "error_code": artifact.error_code or "",
+        "reason_codes": list(artifact.reason_codes or []),
+        "warning_codes": list(artifact.warning_codes or []),
+        "export_preflight": artifact.export_preflight or {},
+    }
+
+
+def _artifact_export_review(artifact: WorkflowArtifact | None) -> dict[str, Any]:
+    if artifact is None:
+        return {}
+    return artifact.export_review or {}
+
+
+def _limited_text_list(value: Any, limit: int = 3) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()][:limit]
+
+
+def _compact_retry_summary(retry: Any) -> dict[str, Any]:
+    if not isinstance(retry, Mapping):
+        return {}
+    return {
+        "status": str(retry.get("status") or ""),
+        "attempt_count": int(retry.get("attempt_count") or 0),
+        "retries_used": int(retry.get("retries_used") or 0),
+        "max_attempts": int(retry.get("max_attempts") or 0),
+        "did_retry": bool(retry.get("did_retry")) if "did_retry" in retry else None,
+        "error_code": str(retry.get("error_code") or ""),
+        "final_error_code": str(retry.get("final_error_code") or ""),
+    }
+
+
+def _compact_stage_telemetry(stage: Any) -> dict[str, Any] | None:
+    if not isinstance(stage, Mapping):
+        return None
+    payload = {
+        "status": str(stage.get("status") or ""),
+        "started_at": str(stage.get("started_at") or ""),
+        "completed_at": str(stage.get("completed_at") or ""),
+        "duration_ms": int(
+            stage.get("duration_ms")
+            if stage.get("duration_ms") is not None
+            else (stage.get("elapsed_ms") or 0)
+        ),
+        "error_code": str(stage.get("error_code") or ""),
+        "retry": _compact_retry_summary(stage.get("retry")),
+    }
+    return payload
+
+
+def _compact_stage_contract_check(check: Any) -> dict[str, Any] | None:
+    if not isinstance(check, Mapping):
+        return None
+    return {
+        "stage_id": str(check.get("stage_id") or ""),
+        "execution_status": str(check.get("execution_status") or ""),
+        "contract_status": str(check.get("contract_status") or ""),
+        "status": str(check.get("status") or check.get("execution_status") or ""),
+        "started_at": str(check.get("started_at") or ""),
+        "completed_at": str(check.get("completed_at") or ""),
+        "duration_ms": int(check.get("duration_ms") or 0),
+        "error_code": str(check.get("error_code") or ""),
+        "retry": _compact_retry_summary(check.get("retry")),
+        "reason_codes": _limited_text_list(check.get("reason_codes"), limit=6),
+        "warning_codes": _limited_text_list(check.get("warning_codes"), limit=6),
+        "reasons": _limited_text_list(check.get("reasons")),
+        "warnings": _limited_text_list(check.get("warnings")),
+    }
+
+
+def _compact_export_preflight(preflight: Any) -> dict[str, Any]:
+    if not isinstance(preflight, Mapping):
+        return {}
+    checks = preflight.get("checks") if isinstance(preflight.get("checks"), Mapping) else {}
+    layout_validation = (
+        checks.get("layout_validation") if isinstance(checks.get("layout_validation"), Mapping) else {}
+    )
+    asset_guard = checks.get("asset_guard") if isinstance(checks.get("asset_guard"), Mapping) else {}
+    stage_contracts = (
+        checks.get("stage_contracts") if isinstance(checks.get("stage_contracts"), Mapping) else {}
+    )
+    compact_stage_contracts = {
+        stage_id: compacted
+        for stage_id in ("image_generation", "copy")
+        if (compacted := _compact_stage_contract_check(stage_contracts.get(stage_id))) is not None
+    }
+    payload = {
+        "status": str(preflight.get("status") or ""),
+        "decision": str(preflight.get("decision") or ""),
+        "error_code": str(preflight.get("error_code") or ""),
+        "message": str(preflight.get("message") or ""),
+        "reason_codes": _limited_text_list(preflight.get("reason_codes"), limit=6),
+        "warning_codes": _limited_text_list(preflight.get("warning_codes"), limit=6),
+        "reasons": _limited_text_list(preflight.get("reasons")),
+        "warnings": _limited_text_list(preflight.get("warnings")),
+        "recommended_actions": _limited_text_list(preflight.get("recommended_actions")),
+        "checks": {
+            "layout_validation": {
+                "status": str(layout_validation.get("status") or ""),
+                "guard_can_execute": (
+                    bool(layout_validation.get("guard_can_execute"))
+                    if "guard_can_execute" in layout_validation
+                    else None
+                ),
+                "error_code": str(layout_validation.get("error_code") or ""),
+            },
+            "asset_guard": {
+                "status": str(asset_guard.get("status") or ""),
+                "can_export": bool(asset_guard.get("can_export")) if "can_export" in asset_guard else None,
+                "error_code": str(asset_guard.get("error_code") or ""),
+            },
+            "stage_contracts": compact_stage_contracts,
+        },
+    }
+    if not payload["checks"]["stage_contracts"]:
+        payload["checks"].pop("stage_contracts", None)
+    return payload
+
+
+def _compact_export_review(review: Any) -> dict[str, Any]:
+    if not isinstance(review, Mapping):
+        return {}
+    payload = {
+        "status": str(review.get("status") or ""),
+        "message": str(review.get("message") or ""),
+        "error_code": str(review.get("error_code") or ""),
+        "result_tier": str(review.get("result_tier") or ""),
+        "blocking_reasons": _limited_text_list(review.get("blocking_reasons")),
+        "reason_codes": _limited_text_list(review.get("reason_codes"), limit=6),
+        "warning_codes": _limited_text_list(review.get("warning_codes"), limit=6),
+        "recommended_actions": _limited_text_list(review.get("recommended_actions")),
+    }
+    checks = _compact_export_preflight({"checks": review.get("checks")}).get("checks")
+    if checks:
+        payload["checks"] = checks
+    critical_stages = (
+        review.get("critical_stages") if isinstance(review.get("critical_stages"), Mapping) else {}
+    )
+    compact_critical_stages = {
+        stage_id: compacted
+        for stage_id, value in critical_stages.items()
+        if (compacted := _compact_stage_telemetry(value)) is not None
+    }
+    if compact_critical_stages:
+        payload["critical_stages"] = compact_critical_stages
+    critical_checks = (
+        review.get("critical_checks") if isinstance(review.get("critical_checks"), Mapping) else {}
+    )
+    if critical_checks:
+        payload["critical_checks"] = {
+            check_id: {
+                "status": str(value.get("status") or ""),
+                "error_code": str(value.get("error_code") or ""),
+            }
+            for check_id, value in critical_checks.items()
+            if isinstance(value, Mapping)
+        }
+    return payload
+
+
+def _compact_result_state(result_state: Any) -> dict[str, Any]:
+    if not isinstance(result_state, Mapping):
+        return {}
+    payload = {
+        "tier": str(result_state.get("tier") or ""),
+        "tier_code": str(result_state.get("tier_code") or ""),
+        "delivery_status": str(result_state.get("delivery_status") or ""),
+        "fallback_used": bool(result_state.get("fallback_used")) if "fallback_used" in result_state else None,
+        "layout_schema_hit": (
+            bool(result_state.get("layout_schema_hit")) if "layout_schema_hit" in result_state else None
+        ),
+        "layout_validation_status": str(result_state.get("layout_validation_status") or ""),
+        "asset_guard_status": str(result_state.get("asset_guard_status") or ""),
+        "image_slot_count": (
+            int(result_state.get("image_slot_count"))
+            if result_state.get("image_slot_count") is not None
+            else None
+        ),
+        "slot_match_rate": result_state.get("slot_match_rate"),
+        "reasons": _limited_text_list(result_state.get("reasons")),
+        "reason_codes": _limited_text_list(result_state.get("reason_codes"), limit=6),
+        "warnings": _limited_text_list(result_state.get("warnings")),
+        "warning_codes": _limited_text_list(result_state.get("warning_codes"), limit=6),
+        "error_code": str(result_state.get("error_code") or ""),
+        "recommended_actions": _limited_text_list(result_state.get("recommended_actions")),
+        "export_preflight": _compact_export_preflight(result_state.get("export_preflight")),
+    }
+    critical_stages = (
+        result_state.get("critical_stages")
+        if isinstance(result_state.get("critical_stages"), Mapping)
+        else {}
+    )
+    compact_critical_stages = {
+        stage_id: compacted
+        for stage_id, value in critical_stages.items()
+        if (compacted := _compact_stage_telemetry(value)) is not None
+    }
+    if compact_critical_stages:
+        payload["critical_stages"] = compact_critical_stages
+    critical_checks = (
+        result_state.get("critical_checks")
+        if isinstance(result_state.get("critical_checks"), Mapping)
+        else {}
+    )
+    if critical_checks:
+        payload["critical_checks"] = {
+            check_id: {
+                "status": str(value.get("status") or ""),
+                "error_code": str(value.get("error_code") or ""),
+            }
+            for check_id, value in critical_checks.items()
+            if isinstance(value, Mapping)
+        }
+    return payload
+
+
+def _latest_workflow_artifact_map(
+    session: Session,
+    run_ids: list[str],
+) -> dict[str, WorkflowArtifact]:
+    if not run_ids:
+        return {}
+    artifact_map: dict[str, WorkflowArtifact] = {}
+    for artifact in session.execute(
+        select(WorkflowArtifact)
+        .where(WorkflowArtifact.run_id.in_(run_ids))
+        .order_by(WorkflowArtifact.run_id.asc(), WorkflowArtifact.id.desc())
+    ).scalars():
+        if artifact.run_id not in artifact_map:
+            artifact_map[artifact.run_id] = artifact
+    return artifact_map
+
+
+def _workflow_result_summary(
+    run: WorkflowRun,
+    artifact: WorkflowArtifact | None,
+) -> dict[str, Any]:
+    result_state, export_review = _extract_design_spec_state(run.design_spec)
+    if not result_state:
+        result_state = _artifact_result_state(artifact)
+    if not export_review:
+        export_review = _artifact_export_review(artifact)
+
+    compact_result_state = _compact_result_state(result_state)
+    compact_export_review = _compact_export_review(export_review)
+    compact_export_preflight = _compact_export_preflight(
+        compact_result_state.get("export_preflight")
+        or (artifact.export_preflight if artifact is not None else {})
+        or {}
+    )
+    if compact_result_state and not compact_result_state.get("export_preflight") and compact_export_preflight:
+        compact_result_state["export_preflight"] = compact_export_preflight
+    if not compact_result_state and not compact_export_review and not compact_export_preflight:
+        return {}
+    return {
+        "resultState": compact_result_state or None,
+        "exportReview": compact_export_review or None,
+        "exportPreflight": compact_export_preflight or None,
+    }
+
+
+DESIGN_TASK_DEFAULT_LIMIT = 50
+DESIGN_TASK_MAX_LIMIT = 200
+DESIGN_TASK_DEFAULT_TYPE = "商品详情页"
+DESIGN_TASK_RUNNING_STATUSES = ("running", "cancelling")
+DESIGN_TASK_SUCCESS_STATUSES = ("completed", "fallback_completed", "生成成功", "待审核")
+DESIGN_TASK_FAILED_STATUSES = ("failed", "cancelled", "生成失败")
+
+
+def _normalize_design_task_limit(limit: int | None) -> int:
+    if limit is None:
+        return DESIGN_TASK_DEFAULT_LIMIT
+    return max(1, min(int(limit), DESIGN_TASK_MAX_LIMIT))
+
+
+def _normalize_design_task_offset(offset: int | None) -> int:
+    if offset is None:
+        return 0
+    return max(0, int(offset))
+
+
+def _design_task_filter_conditions(
+    *,
+    brand: str | None = None,
+    status: str | None = None,
+    task_type: str | None = None,
+    search: str | None = None,
+) -> list[Any]:
+    filters: list[Any] = []
+    if brand:
+        filters.append(WorkflowRun.brand_name == brand)
+    if status:
+        filters.append(WorkflowRun.status == status)
+    if task_type:
+        filters.append(func.coalesce(WorkflowRun.task_type, DESIGN_TASK_DEFAULT_TYPE) == task_type)
+    keyword = (search or "").strip().lower()
+    if keyword:
+        pattern = f"%{keyword}%"
+        filters.append(
+            or_(
+                func.lower(WorkflowRun.run_id).like(pattern),
+                func.lower(func.coalesce(WorkflowRun.task_code, "")).like(pattern),
+                func.lower(func.coalesce(WorkflowRun.brand_name, "")).like(pattern),
+                func.lower(func.coalesce(WorkflowRun.product_name, "")).like(pattern),
+            )
+        )
+    return filters
+
+
+def _design_task_metrics(
+    session: Session,
+    filters: list[Any],
+) -> dict[str, int]:
+    total, running, success, failed = session.execute(
+        select(
+            func.count(WorkflowRun.run_id),
+            func.coalesce(
+                func.sum(
+                    case((WorkflowRun.status.in_(DESIGN_TASK_RUNNING_STATUSES), 1), else_=0)
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case((WorkflowRun.status.in_(DESIGN_TASK_SUCCESS_STATUSES), 1), else_=0)
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case((WorkflowRun.status.in_(DESIGN_TASK_FAILED_STATUSES), 1), else_=0)
+                ),
+                0,
+            ),
+        ).where(*filters)
+    ).one()
+    return {
+        "total": int(total or 0),
+        "running": int(running or 0),
+        "success": int(success or 0),
+        "failed": int(failed or 0),
+    }
+
+
+def _serialize_design_task_summary(
+    run: WorkflowRun,
+    artifact: WorkflowArtifact | None,
+) -> dict[str, Any]:
+    return {
+        "runId": run.run_id,
+        "taskId": run.task_code or run.run_id,
+        "title": run.product_name or run.task_code or run.run_id,
+        "brand": run.brand_name or "",
+        "product": run.product_name or "",
+        "taskType": run.task_type or DESIGN_TASK_DEFAULT_TYPE,
+        "status": run.status,
+        "summary": run.summary or "",
+        "createdAt": run.created_at.isoformat() if run.created_at else None,
+        "completedAt": run.completed_at.isoformat() if run.completed_at else None,
+        "resultSummary": _workflow_result_summary(run, artifact),
+    }
 
 
 def load_run_snapshot(run_id: str) -> dict[str, Any] | None:
@@ -636,6 +1121,11 @@ def load_run_snapshot(run_id: str) -> dict[str, Any] | None:
                 "data": stage.data or {},
                 "used_model": stage.used_model,
                 "elapsed_ms": stage.elapsed_ms,
+                "started_at": stage.started_at.isoformat() if stage.started_at else None,
+                "completed_at": stage.completed_at.isoformat() if stage.completed_at else None,
+                "duration_ms": stage.elapsed_ms,
+                "error_code": stage.error_code or "",
+                "retry": stage.retry or {},
             }
             for stage in session.execute(
                 select(WorkflowStage)
@@ -696,6 +1186,60 @@ def _sanitize_request_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
             sanitized["api_key"] = ""
         data["model_settings"] = sanitized
     return data
+
+
+def _input_layers_from_logs(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    for entry in reversed(logs):
+        payload = entry.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        layers = normalize_input_layers(payload.get("input_layers"))
+        if layers:
+            return layers
+    return {}
+
+
+def _rebuild_input_layers(
+    request_payload: Mapping[str, Any] | None,
+    assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    user_brief = ""
+    if isinstance(request_payload, Mapping):
+        user_brief = str(request_payload.get("product_brief") or "")
+    rebuild_assets = [
+        {
+            "name": item.get("name"),
+            "bucket": item.get("bucket"),
+            "extracted_text": item.get("extracted_text") or item.get("extractedText"),
+            "metadata": {},
+        }
+        for item in assets
+    ]
+    return normalize_input_layers(build_input_layers(user_brief, rebuild_assets))
+
+
+def _resolve_workflow_detail_input_layers(
+    request_payload: Mapping[str, Any] | None,
+    logs: list[dict[str, Any]],
+    assets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    persisted_layers = (
+        normalize_input_layers(request_payload.get("input_layers"))
+        if isinstance(request_payload, Mapping)
+        else {}
+    )
+    if persisted_layers:
+        return {"source": "request_payload", **detail_input_layers(persisted_layers)}
+
+    logged_layers = _input_layers_from_logs(logs)
+    if logged_layers:
+        return {"source": "workflow_log", **detail_input_layers(logged_layers)}
+
+    rebuilt_layers = _rebuild_input_layers(request_payload, assets)
+    if rebuilt_layers:
+        return {"source": "assets_rebuilt", **detail_input_layers(rebuilt_layers)}
+
+    return None
 
 
 def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
@@ -774,6 +1318,7 @@ def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
                 .order_by(WorkflowAsset.id.asc())
             ).scalars()
         ]
+        input_layers = _resolve_workflow_detail_input_layers(run.request_payload, logs, assets)
         artifact_data = (
             {
                 "previewSvg": artifact.preview_svg,
@@ -784,6 +1329,15 @@ def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
                 "exportStatus": artifact.export_status or ("completed" if artifact.figma_url else "fallback_script"),
                 "exportMode": artifact.export_mode or ("figma_url" if artifact.figma_url else "script"),
                 "exportError": artifact.export_error,
+                "outputMetadata": artifact.output_metadata,
+                "resultTier": artifact.result_tier,
+                "tierCode": artifact.tier_code,
+                "deliveryStatus": artifact.delivery_status,
+                "errorCode": artifact.error_code,
+                "reasonCodes": list(artifact.reason_codes or []),
+                "warningCodes": list(artifact.warning_codes or []),
+                "exportPreflight": artifact.export_preflight or {},
+                "exportReview": artifact.export_review or {},
                 "editableHtml": artifact.editable_html,
                 "readme": artifact.readme,
                 "outputDir": artifact.output_dir,
@@ -792,6 +1346,11 @@ def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
             else None
         )
         log_messages = [item["message"] for item in logs]
+        result_state, export_review = _extract_design_spec_state(run.design_spec)
+        if not result_state:
+            result_state = _artifact_result_state(artifact)
+        if not export_review:
+            export_review = _artifact_export_review(artifact)
         return {
             "runId": run.run_id,
             "taskCode": run.task_code or run.run_id,
@@ -807,6 +1366,8 @@ def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
             "agentReport": run.agent_report or "",
             "requestPayload": _sanitize_request_payload(run.request_payload),
             "designSpec": run.design_spec or {},
+            "resultState": result_state,
+            "exportReview": export_review,
             "warnings": run.warnings or [],
             "failureReason": _workflow_failure_reason(run.status, run.warnings or [], log_messages),
             "createdAt": run.created_at.isoformat() if run.created_at else None,
@@ -814,6 +1375,7 @@ def get_workflow_detail(run_id: str) -> dict[str, Any] | None:
             "stages": stages,
             "logs": logs,
             "assets": assets,
+            "inputLayers": input_layers,
             "artifacts": artifact_data,
             "feedback": feedback,
         }
@@ -908,18 +1470,23 @@ def get_dashboard_data() -> dict[str, Any] | None:
                 .limit(3)
             ).scalars()
         ]
-        design_tasks = [
-            {
-                "title": item.product_name or item.task_code or item.run_id,
-                "status": item.status,
-                "summary": item.summary or "等待查看任务详情。",
-            }
-            for item in session.execute(
+        recent_design_runs = list(
+            session.execute(
                 select(WorkflowRun)
                 .where(WorkflowRun.brand_name == current_brand.name)
                 .order_by(WorkflowRun.created_at.desc())
                 .limit(3)
             ).scalars()
+        )
+        recent_artifacts = _latest_workflow_artifact_map(
+            session, [item.run_id for item in recent_design_runs]
+        )
+        design_tasks = [
+            {
+                **_serialize_design_task_summary(item, recent_artifacts.get(item.run_id)),
+                "summary": item.summary or "等待查看任务详情。",
+            }
+            for item in recent_design_runs
         ]
 
         return {
@@ -1697,10 +2264,13 @@ def _build_layout_schema_from_assets(
                 continue
             dims = sheet.get("dimensions") or {}
             section_id = f"wf_{section_index:02d}_{str(sheet.get('name') or 'sheet').lower()}"
+            section_role = _infer_slot_role(str(sheet.get("name") or ""), "")
             section = {
                 "id": section_id,
                 "name": str(sheet.get("name") or f"线框页 {section_index}"),
-                "component_type": "wireframe_sheet",
+                "role": "hero" if section_index == 1 else ("feature" if section_role == "detail" else section_role),
+                "component_type": "wireframe_sheet" if section_role == "detail" else section_role,
+                "order": section_index,
                 "source_asset": wireframe["asset_name"],
                 "x": 0,
                 "y": 0,
@@ -1708,14 +2278,17 @@ def _build_layout_schema_from_assets(
                 "h": int(dims.get("height_px") or 900),
                 "background": {"type": "solid", "color": "#ffffff"},
                 "z_index": section_index,
+                "required_text_fields": ["headline"],
+                "required_image_slots": [],
             }
             schema["sections"].append(section)
             for image_index, obj in enumerate(image_objects[:36], start=1):
                 box = obj.get("box") or {}
                 slot_role = _infer_slot_role(str(obj.get("name") or ""), str(obj.get("media_path") or ""))
+                slot_id = f"{section_id}_img_{image_index:02d}"
                 schema["image_slots"].append(
                     {
-                        "id": f"{section_id}_img_{image_index:02d}",
+                        "id": slot_id,
                         "section_id": section_id,
                         "role": slot_role,
                         "asset_type": slot_role,
@@ -1725,10 +2298,14 @@ def _build_layout_schema_from_assets(
                         "h": int(box.get("h") or 1),
                         "fit": "cover",
                         "crop": "center",
+                        "priority": "high" if image_index == 1 or slot_role in {"hero", "product_gallery"} else "medium",
+                        "required": image_index == 1,
                         "source_media_path": obj.get("media_path") or "",
                         "cell_anchor": obj.get("cell_anchor") or {},
                     }
                 )
+                if image_index == 1:
+                    section["required_image_slots"].append(slot_id)
             for text_index, item in enumerate([*text_objects, *cells][:80], start=1):
                 box = item.get("box") or {}
                 text = str(item.get("text") or "")
@@ -1765,13 +2342,17 @@ def _build_layout_schema_from_assets(
                 {
                     "id": section_id,
                     "name": name,
+                    "role": "hero" if index == 1 else ("feature" if role == "detail" else role),
                     "component_type": role,
+                    "order": index,
                     "x": 0,
                     "y": y,
                     "w": 790,
                     "h": height,
                     "background": {"type": "solid", "color": "#ffffff" if index % 2 else "#f7f7f4"},
                     "z_index": index,
+                    "required_text_fields": ["headline"],
+                    "required_image_slots": [f"{section_id}_image"],
                 }
             )
             schema["image_slots"].append(
@@ -1786,6 +2367,8 @@ def _build_layout_schema_from_assets(
                     "h": max(260, height - 200),
                     "fit": "cover",
                     "crop": "center",
+                    "priority": "high" if index <= 2 else "medium",
+                    "required": True,
                 }
             )
             y += height
@@ -1835,6 +2418,10 @@ def _score_rule_quality(
         (item.get("slots") for item in components if item.get("title") == "__image_slots__"),
         None,
     )
+    layout_schema_validation = next(
+        (item.get("validation") for item in layout_rules if item.get("title") == "__layout_schema_validation__"),
+        None,
+    )
     visual_tokens = next(
         (item.get("tokens") for item in design_rules if item.get("title") == "__visual_tokens__"),
         None,
@@ -1844,6 +2431,9 @@ def _score_rule_quality(
         "has_layout_schema": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or isinstance(layout_schema, dict),
         "has_sections": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or (isinstance(layout_schema, dict) and bool(layout_schema.get("sections"))),
         "has_image_slots": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or (isinstance(image_slots, list) and bool(image_slots)),
+        "layout_schema_validation_passed": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or (
+            isinstance(layout_schema_validation, dict) and str(layout_schema_validation.get("status") or "") == "passed"
+        ),
         "has_components": bool([item for item in components if not str(item.get("title") or "").startswith("__")]),
         "has_human_readable_rules": bool(
             [item for item in [*design_rules, *layout_rules] if not str(item.get("title") or "").startswith("__")]
@@ -1858,11 +2448,12 @@ def _score_rule_quality(
         if target_key == RULE_TARGET_BRAND_CORE
         else {
             "has_visual_tokens": 5,
-            "has_layout_schema": 30,
-            "has_sections": 25,
-            "has_image_slots": 25,
-            "has_components": 8,
-            "has_human_readable_rules": 7,
+            "has_layout_schema": 24,
+            "has_sections": 20,
+            "has_image_slots": 20,
+            "layout_schema_validation_passed": 18,
+            "has_components": 10,
+            "has_human_readable_rules": 8,
         }
     )
     score = sum(weight for key, weight in weights.items() if checks.get(key))
@@ -1873,13 +2464,33 @@ def _score_rule_quality(
         blockers.append("缺少可执行 layout_schema，生成阶段会退回通用模板")
     if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and not checks["has_image_slots"]:
         blockers.append("缺少 image_slots，素材无法精准匹配图片槽")
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(layout_schema_validation, dict):
+        if str(layout_schema_validation.get("status") or "") == "failed":
+            blockers.extend(
+                [str(item) for item in layout_schema_validation.get("issues", []) if str(item).strip()]
+            )
+        elif str(layout_schema_validation.get("status") or "") == "warning":
+            overall = max(60.0, overall - 8)
     if target_key == RULE_TARGET_BRAND_CORE and not checks["has_visual_tokens"]:
         blockers.append("缺少 visual_tokens，品牌规范仍主要依赖文本提示词")
     return {
         "overall": overall,
         "checks": checks,
         "blocking_issues": blockers,
-        "publish_recommendation": "ready" if overall >= 75 and not blockers else "needs_review",
+        "layout_schema_validation": layout_schema_validation,
+        "publish_recommendation": (
+            "ready"
+            if overall >= 75
+            and not blockers
+            and (
+                target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT
+                or (
+                    isinstance(layout_schema_validation, dict)
+                    and str(layout_schema_validation.get("status") or "") == "passed"
+                )
+            )
+            else "needs_review"
+        ),
     }
 
 
@@ -2202,6 +2813,90 @@ def _normalize_rule_items(value: Any, fallback: list[dict[str, Any]]) -> list[di
     return items or fallback
 
 
+def _upsert_hidden_rule_item(
+    items: list[dict[str, Any]],
+    title: str,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    normalized = [item for item in items if str(item.get("title") or "") != title]
+    normalized.append(payload)
+    return normalized
+
+
+def _validate_detail_page_rule_content(
+    content: dict[str, Any],
+    raw_layout_schema: Any | None = None,
+    raw_image_slots: Any | None = None,
+    require_explicit_training_fields: bool = False,
+) -> dict[str, Any]:
+    layout_rules = list(content.get("layout_rules") or [])
+    components = list(content.get("components") or [])
+    schema_source = raw_layout_schema
+    detached_slots = raw_image_slots
+    if not require_explicit_training_fields and not isinstance(schema_source, dict):
+        schema_source = next(
+            (
+                item.get("schema")
+                for item in layout_rules
+                if isinstance(item, dict) and item.get("title") == "__layout_schema__"
+            ),
+            None,
+        )
+        detached_slots = next(
+            (
+                item.get("slots")
+                for item in components
+                if isinstance(item, dict) and item.get("title") == "__image_slots__"
+            ),
+            detached_slots,
+        )
+    report = validate_layout_schema_payload(
+        schema_source,
+        detached_image_slots=detached_slots,
+        require_explicit_training_fields=require_explicit_training_fields,
+    )
+    normalized_schema = report.get("normalized_schema") if isinstance(report.get("normalized_schema"), dict) else {}
+    if report["status"] == "failed":
+        raise ValueError(
+            "detail_page_layout 训练结果未通过入库前校验："
+            + "；".join([str(item) for item in report.get("issues", [])[:6]])
+        )
+
+    validation_payload = {
+        "title": "__layout_schema_validation__",
+        "description": "详情页布局训练入库前校验结果，供发布判断与生成链路读取。",
+        "validation": {
+            key: value
+            for key, value in report.items()
+            if key != "normalized_schema"
+        },
+    }
+    layout_rules = _upsert_hidden_rule_item(
+        [item for item in layout_rules if isinstance(item, dict)],
+        "__layout_schema__",
+        {
+            "title": "__layout_schema__",
+            "description": "可执行详情页 Layout JSON Schema，包含 section、坐标、图片槽和文本层。",
+            "schema": normalized_schema,
+        },
+    )
+    layout_rules = _upsert_hidden_rule_item(layout_rules, "__layout_schema_validation__", validation_payload)
+    components = _upsert_hidden_rule_item(
+        [item for item in components if isinstance(item, dict)],
+        "__image_slots__",
+        {
+            "title": "__image_slots__",
+            "description": "可执行图片槽定义，供素材匹配与裁切使用。",
+            "slots": normalized_schema.get("image_slots", []),
+        },
+    )
+    return {
+        **content,
+        "layout_rules": layout_rules,
+        "components": components,
+    }
+
+
 def _normalize_model_rule_content(
     model_result: dict[str, Any],
     fallback: dict[str, Any],
@@ -2221,7 +2916,13 @@ def _normalize_model_rule_content(
             }
         )
 
-    layout_schema = model_result.get("layout_schema")
+    raw_layout_schema = model_result.get("layout_schema")
+    raw_image_slots = model_result.get("image_slots")
+    layout_schema = (
+        normalize_layout_schema_payload(raw_layout_schema, detached_image_slots=raw_image_slots)
+        if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(raw_layout_schema, dict)
+        else raw_layout_schema
+    )
     if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(layout_schema, dict):
         layout_rules.append(
             {
@@ -2231,7 +2932,7 @@ def _normalize_model_rule_content(
             }
         )
 
-    image_slots = model_result.get("image_slots")
+    image_slots = layout_schema.get("image_slots") if isinstance(layout_schema, dict) else raw_image_slots
     if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(image_slots, list):
         components.append(
             {
@@ -2250,13 +2951,21 @@ def _normalize_model_rule_content(
             }
         )
 
-    return {
+    content = {
         "design_rules": design_rules,
         "layout_rules": layout_rules,
         "components": components,
         "source_assets": _normalize_rule_items(model_result.get("source_assets"), fallback["source_assets"]),
         "markdown": str(model_result.get("markdown") or "").strip(),
     }
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT:
+        return _validate_detail_page_rule_content(
+            content,
+            raw_layout_schema=raw_layout_schema,
+            raw_image_slots=raw_image_slots,
+            require_explicit_training_fields=True,
+        )
+    return content
 
 
 def train_brand_rule_version(
@@ -2307,6 +3016,8 @@ def train_brand_rule_version(
         )
         if model_result:
             generated = _normalize_model_rule_content(model_result, generated, target_key)
+        elif target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT:
+            generated = _validate_detail_page_rule_content(generated)
         design_rules = generated["design_rules"]
         layout_rules = generated["layout_rules"]
         components = generated["components"]
@@ -2404,6 +3115,15 @@ def train_brand_rule_version(
             "version": row.version,
             "markdown": row.markdown,
             "targetKey": target_key,
+            "ruleQuality": rule_quality,
+            "layoutSchemaValidation": next(
+                (
+                    item.get("validation")
+                    for item in layout_rules
+                    if isinstance(item, dict) and item.get("title") == "__layout_schema_validation__"
+                ),
+                None,
+            ),
         }
 
 
@@ -2859,44 +3579,55 @@ def get_design_tasks_page_data(
     status: str | None = None,
     task_type: str | None = None,
     search: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
 ) -> dict[str, Any] | None:
     with session_scope() as session:
         if session is None:
             return None
         page = _setting(session, "design_tasks_page", {})
-        base_tasks = list(session.execute(select(WorkflowRun).order_by(WorkflowRun.created_at.desc())).scalars())
-        if not base_tasks:
-            return {
-                "page": page,
-                "metrics": {"total": 0, "running": 0, "success": 0, "failed": 0},
-                "brands": [],
-                "taskTypes": [],
-                "statuses": [],
-                "filters": {"brand": "", "status": "", "taskType": "", "search": ""},
-                "tasks": [],
-            }
-        filtered = base_tasks
-        if brand:
-            filtered = [item for item in filtered if item.brand_name == brand]
-        if status:
-            filtered = [item for item in filtered if item.status == status]
-        if task_type:
-            filtered = [item for item in filtered if (item.task_type or "商品详情页") == task_type]
-        if search:
-            keyword = search.strip().lower()
-            filtered = [
-                item
-                for item in filtered
-                if keyword in (item.task_code or item.run_id or "").lower()
-                or keyword in (item.brand_name or "").lower()
-                or keyword in (item.product_name or "").lower()
-            ]
-        running_statuses = {"running", "cancelling"}
-        success_statuses = {"completed", "fallback_completed", "生成成功", "待审核"}
-        failed_statuses = {"failed", "cancelled", "生成失败"}
-        brands = sorted({item.brand_name for item in base_tasks if item.brand_name})
-        task_types = sorted({item.task_type or "商品详情页" for item in base_tasks})
-        statuses = sorted({item.status for item in base_tasks if item.status})
+        limit_value = _normalize_design_task_limit(limit)
+        offset_value = _normalize_design_task_offset(offset)
+        filters = _design_task_filter_conditions(
+            brand=brand,
+            status=status,
+            task_type=task_type,
+            search=search,
+        )
+        brands = list(
+            session.execute(
+                select(WorkflowRun.brand_name)
+                .where(WorkflowRun.brand_name.is_not(None))
+                .distinct()
+                .order_by(WorkflowRun.brand_name.asc())
+            ).scalars()
+        )
+        task_types = list(
+            session.execute(
+                select(func.coalesce(WorkflowRun.task_type, DESIGN_TASK_DEFAULT_TYPE))
+                .distinct()
+                .order_by(func.coalesce(WorkflowRun.task_type, DESIGN_TASK_DEFAULT_TYPE).asc())
+            ).scalars()
+        )
+        statuses = list(
+            session.execute(
+                select(WorkflowRun.status)
+                .where(WorkflowRun.status.is_not(None))
+                .distinct()
+                .order_by(WorkflowRun.status.asc())
+            ).scalars()
+        )
+        metrics = _design_task_metrics(session, filters)
+        filtered = list(
+            session.execute(
+                select(WorkflowRun)
+                .where(*filters)
+                .order_by(WorkflowRun.created_at.desc(), WorkflowRun.run_id.desc())
+                .offset(offset_value)
+                .limit(limit_value)
+            ).scalars()
+        )
+        artifact_map = _latest_workflow_artifact_map(session, [item.run_id for item in filtered])
         return {
             "page": page,
             "brands": brands,
@@ -2908,23 +3639,20 @@ def get_design_tasks_page_data(
                 "taskType": task_type or "",
                 "search": search or "",
             },
-            "metrics": {
-                "total": len(filtered),
-                "running": sum(1 for item in filtered if item.status in running_statuses),
-                "success": sum(1 for item in filtered if item.status in success_statuses),
-                "failed": sum(1 for item in filtered if item.status in failed_statuses),
+            "sort": {
+                "field": "createdAt",
+                "direction": "desc",
+            },
+            "metrics": metrics,
+            "pagination": {
+                "limit": limit_value,
+                "offset": offset_value,
+                "returned": len(filtered),
+                "total": metrics["total"],
+                "hasMore": offset_value + len(filtered) < metrics["total"],
             },
             "tasks": [
-                {
-                    "runId": item.run_id,
-                    "taskId": item.task_code or item.run_id,
-                    "brand": item.brand_name or "",
-                    "product": item.product_name or "",
-                    "taskType": item.task_type or "商品详情页",
-                    "status": item.status,
-                    "createdAt": item.created_at.isoformat() if item.created_at else None,
-                    "completedAt": item.completed_at.isoformat() if item.completed_at else None,
-                }
+                _serialize_design_task_summary(item, artifact_map.get(item.run_id))
                 for item in filtered
             ],
         }

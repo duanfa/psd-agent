@@ -140,6 +140,83 @@ export interface StageMeta {
   icon: string;
 }
 
+export interface StageContractCheck {
+  stage_id: string;
+  execution_status: string;
+  contract_status: string;
+  reasons: string[];
+  reason_codes: string[];
+  warnings: string[];
+  warning_codes: string[];
+  recommended_actions: string[];
+}
+
+export interface ExportPreflightChecks {
+  layout_validation?: {
+    status?: string;
+    guard_can_execute?: boolean;
+  };
+  asset_guard?: {
+    status?: string;
+    can_export?: boolean;
+  };
+  stage_contracts?: {
+    image_generation?: StageContractCheck;
+    copy?: StageContractCheck;
+    [key: string]: StageContractCheck | undefined;
+  };
+}
+
+export interface ExportPreflight {
+  status?: string;
+  decision?: "ready" | "review_only" | "blocked" | string;
+  error_code?: string;
+  message?: string;
+  reason_codes?: string[];
+  warning_codes?: string[];
+  reasons?: string[];
+  warnings?: string[];
+  recommended_actions?: string[];
+  checks?: ExportPreflightChecks;
+}
+
+export interface ResultState {
+  tier?: string;
+  tier_code?: string;
+  delivery_status?: "ready" | "review_only" | "blocked" | string;
+  fallback_used?: boolean;
+  layout_schema_hit?: boolean;
+  layout_validation_status?: string;
+  asset_guard_status?: string;
+  image_slot_count?: number;
+  slot_match_rate?: number;
+  reasons?: string[];
+  reason_codes?: string[];
+  warnings?: string[];
+  warning_codes?: string[];
+  error_code?: string;
+  recommended_actions?: string[];
+  export_preflight?: ExportPreflight;
+}
+
+export interface ExportReview {
+  status?: string;
+  message?: string;
+  error_code?: string;
+  result_tier?: string;
+  blocking_reasons?: string[];
+  reason_codes?: string[];
+  warning_codes?: string[];
+  recommended_actions?: string[];
+  checks?: ExportPreflightChecks;
+}
+
+export interface WorkflowResultSummaryPayload {
+  resultState?: ResultState | null;
+  exportReview?: ExportReview | null;
+  exportPreflight?: ExportPreflight | null;
+}
+
 export interface WorkflowResult {
   run_id: string;
   status: "completed" | "fallback_completed" | "failed";
@@ -159,9 +236,21 @@ export interface WorkflowResult {
     export_status?: string | null;
     export_mode?: string | null;
     export_error?: string | null;
+    output_metadata?: string | null;
+    result_tier?: string | null;
+    tier_code?: string | null;
+    delivery_status?: string | null;
+    error_code?: string | null;
+    reason_codes?: string[];
+    warning_codes?: string[];
+    export_preflight?: ExportPreflight;
+    export_review?: ExportReview;
+    result_state?: ResultState;
     editable_html: string;
     readme: string;
   };
+  result_state?: ResultState;
+  export_review?: ExportReview;
   assets: Array<{
     name: string;
     content_type?: string;
@@ -171,6 +260,20 @@ export interface WorkflowResult {
     bucket: string;
   }>;
   warnings: string[];
+}
+
+export interface DesignTaskSummaryListItem {
+  runId: string;
+  taskId: string;
+  brand?: string;
+  product?: string;
+  title?: string;
+  taskType: string;
+  status: string;
+  summary?: string;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  resultSummary?: WorkflowResultSummaryPayload | null;
 }
 
 export interface DefaultsResponse {
@@ -229,7 +332,7 @@ export interface DashboardResponse {
   };
   stats: Array<{ label: string; value: string | number; description: string }>;
   trainingTasks: Array<{ title: string; status: string; summary: string }>;
-  designTasks: Array<{ title: string; status: string; summary: string }>;
+  designTasks: DesignTaskSummaryListItem[];
   quickActions: Array<{ title: string; description: string; href: string }>;
 }
 
@@ -429,17 +532,10 @@ export interface DesignTasksPageResponse {
   taskTypes: string[];
   statuses: string[];
   filters: { brand: string; status: string; taskType: string; search: string };
+  sort: { field: string; direction: "asc" | "desc" };
   metrics: { total: number; running: number; success: number; failed: number };
-  tasks: Array<{
-    runId: string;
-    taskId: string;
-    brand: string;
-    product: string;
-    taskType: string;
-    status: string;
-    createdAt?: string | null;
-    completedAt?: string | null;
-  }>;
+  pagination: { limit: number; offset: number; returned: number; total: number; hasMore: boolean };
+  tasks: DesignTaskSummaryListItem[];
 }
 
 export interface WorkflowDetailResponse {
@@ -457,6 +553,8 @@ export interface WorkflowDetailResponse {
   agentReport: string;
   requestPayload: Record<string, unknown>;
   designSpec: Record<string, unknown>;
+  resultState?: ResultState;
+  exportReview?: ExportReview;
   warnings: string[];
   failureReason?: string | null;
   createdAt?: string | null;
@@ -477,6 +575,24 @@ export interface WorkflowDetailResponse {
     bucket: string;
     extractedText?: string | null;
   }>;
+  inputLayers?: {
+    source: "request_payload" | "workflow_log" | "assets_rebuilt";
+    user_brief: string;
+    brief_summary: string;
+    layout_reference: string;
+    raw_wireframe_dump: string;
+    raw_wireframe_dump_chars: number;
+    raw_wireframe_dump_truncated: boolean;
+    sources: Array<{
+      name: string;
+      bucket: string;
+      has_brief_summary: boolean;
+      has_layout_reference: boolean;
+      has_raw_wireframe_dump: boolean;
+    }>;
+    brief_asset_count: number;
+    wireframe_asset_count: number;
+  } | null;
   artifacts?: {
     previewSvg: string;
     designSpec: string;
@@ -486,6 +602,15 @@ export interface WorkflowDetailResponse {
     exportStatus?: string | null;
     exportMode?: string | null;
     exportError?: string | null;
+    outputMetadata?: string | null;
+    resultTier?: string | null;
+    tierCode?: string | null;
+    deliveryStatus?: string | null;
+    errorCode?: string | null;
+    reasonCodes?: string[];
+    warningCodes?: string[];
+    exportPreflight?: ExportPreflight;
+    exportReview?: ExportReview;
     editableHtml?: string | null;
     readme: string;
     outputDir: string;
@@ -724,8 +849,15 @@ export async function fetchProductsPage(): Promise<ProductsPageResponse> {
   return fetchJson("/api/pages/products");
 }
 
-export async function fetchDesignTasksPage(): Promise<DesignTasksPageResponse> {
-  return fetchJson("/api/pages/design-tasks");
+export async function fetchDesignTasksPage(params?: {
+  limit?: number;
+  offset?: number;
+}): Promise<DesignTasksPageResponse> {
+  const query = new URLSearchParams();
+  if (params?.limit !== undefined) query.set("limit", String(params.limit));
+  if (params?.offset !== undefined) query.set("offset", String(params.offset));
+  const suffix = query.toString();
+  return fetchJson(`/api/pages/design-tasks${suffix ? `?${suffix}` : ""}`);
 }
 
 export async function fetchDesignTasksPageWithFilters(filters: {
@@ -733,12 +865,16 @@ export async function fetchDesignTasksPageWithFilters(filters: {
   status?: string;
   taskType?: string;
   search?: string;
+  limit?: number;
+  offset?: number;
 }): Promise<DesignTasksPageResponse> {
   const params = new URLSearchParams();
   if (filters.brand) params.set("brand", filters.brand);
   if (filters.status) params.set("status", filters.status);
   if (filters.taskType) params.set("task_type", filters.taskType);
   if (filters.search) params.set("search", filters.search);
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) params.set("offset", String(filters.offset));
   const query = params.toString();
   return fetchJson(`/api/pages/design-tasks${query ? `?${query}` : ""}`);
 }

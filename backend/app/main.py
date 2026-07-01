@@ -17,6 +17,11 @@ from .defaults import (
     load_system_model_config,
     load_workflow_defaults,
 )
+from .input_layers import (
+    build_asset_input_layers,
+    build_input_layers,
+    input_layers_log_payload,
+)
 from .llm import LLMClient, LLMUnavailable, resolve_api_key, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
@@ -409,6 +414,7 @@ def _brand_rule_model_result(
                     "image_slots": [],
                     "text_layers": [],
                     "component_templates": [],
+                    "global_constraints": {},
                 },
                 "image_slots": [],
             }
@@ -459,7 +465,8 @@ def _brand_rule_model_result(
             "3. markdown 要包含：训练输入、素材摘要、页面结构、文字排版层级、图片放置区域、留白与栅格、组件模板、禁用项。\n"
             "4. layout_rules 必须明确描述主图区、卖点图区、参数/对比区、CTA 区等位置或比例关系。\n"
             "5. 必须额外输出可执行 layout_schema，包含 sections、image_slots、text_layers、component_templates；"
-            "每个 section 和 slot 尽量给出 x/y/w/h、component_type、background、fit/crop、asset_type。\n"
+            "每个 section 尽量给出 id、name、role、component_type、order、x/y/w/h、background、required_image_slots、required_text_fields；"
+            "每个 slot 尽量给出 id、section_id、role、asset_type、x/y/w/h、fit/crop、priority、required。\n"
             "6. 如果 selected_assets.metadata.wireframe_spec 存在，优先基于其中的 drawing object、cell box、merged range、media path 抽取 layout_schema。\n"
             "7. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description；"
             "layout_schema 和 image_slots 作为 JSON 字段单独输出。\n\n"
@@ -514,7 +521,8 @@ def train_brand_rules(payload: TrainBrandRuleRequest) -> dict[str, object]:
     except ValueError as exc:
         append_log(run_id, "BrandRuleTrain", "训练失败", str(exc))
         set_run_state(run_id, "failed", None)
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status_code = 404 if "not found" in str(exc) else 422
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     finally:
         snapshot = get_run_snapshot(run_id)
         if snapshot.get("status") == "running":
@@ -585,12 +593,16 @@ def design_tasks_page(
     status: str | None = Query(default=None),
     task_type: str | None = Query(default=None),
     search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     data = database.get_design_tasks_page_data(
         brand=brand,
         status=status,
         task_type=task_type,
         search=search,
+        limit=limit,
+        offset=offset,
     )
     if data is None:
         database.ensure_seed_data()
@@ -599,6 +611,8 @@ def design_tasks_page(
             status=status,
             task_type=task_type,
             search=search,
+            limit=limit,
+            offset=offset,
         )
     if data is None:
         raise HTTPException(status_code=404, detail="design tasks data not found")
@@ -691,6 +705,7 @@ def _save_assets(
         with target.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         wireframe_spec = parse_wireframe_spec(target)
+        extracted_text = _extract_spreadsheet_text(target)
         metadata: dict[str, object] = {}
         if wireframe_spec:
             metadata["wireframe_spec"] = wireframe_spec
@@ -699,15 +714,19 @@ def _save_assets(
                 "media_count": wireframe_spec.get("media_count", 0),
                 "drawing_object_count": wireframe_spec.get("drawing_object_count", 0),
             }
+        input_layers = build_asset_input_layers(filename, extracted_text, metadata)
+        if input_layers:
+            metadata["input_layers"] = input_layers
+        bucket = bucket_override or classify_asset(filename, file.content_type)
         assets.append(
             UploadedAsset(
                 name=filename,
                 content_type=file.content_type,
                 size=target.stat().st_size,
                 saved_path=str(target),
-                extracted_text=_extract_spreadsheet_text(target),
+                extracted_text=extracted_text,
                 metadata=metadata,
-                bucket=bucket_override or classify_asset(filename, file.content_type),
+                bucket=bucket,
             )
         )
     return assets
@@ -946,38 +965,26 @@ def generate_workflow(
         ),
     ]
 
-    spreadsheet_text = "\n\n".join(
-        asset.extracted_text or "" for asset in assets if asset.extracted_text
-    ).strip()
-    if spreadsheet_text and spreadsheet_text not in request.product_brief:
-        if _looks_like_example_brief(request.product_brief, request.product_name):
-            append_log(
-                run_id,
-                "Workflow",
-                "检测到示例 Product Brief 与当前商品不匹配，已在追加 Excel 前清空默认示例 brief",
-                {"removed_brief": request.product_brief[:500], "product_name": request.product_name},
-            )
-            request.product_brief = ""
-        parsed_brief_assets = [
-            {
-                "name": asset.name,
-                "bucket": asset.bucket,
-                "chars": len(asset.extracted_text or ""),
-            }
-            for asset in assets
-            if asset.extracted_text
-        ]
-        request.product_brief = "\n\n".join(
-            part for part in [request.product_brief, spreadsheet_text] if part
-        )
+    has_layered_brief_input = any(
+        asset.bucket == "brief" and ((asset.extracted_text or "").strip() or asset.metadata.get("wireframe_spec"))
+        for asset in assets
+    )
+    if has_layered_brief_input and _looks_like_example_brief(request.product_brief, request.product_name):
         append_log(
             run_id,
             "Workflow",
-            "Brief Excel 已解析并追加到 brief",
-            {
-                "files": parsed_brief_assets,
-                "appended_chars": len(spreadsheet_text),
-            },
+            "检测到示例 Product Brief 与当前商品不匹配，已在构建分层输入前清空默认示例 brief",
+            {"removed_brief": request.product_brief[:500], "product_name": request.product_name},
+        )
+        request.product_brief = ""
+
+    layered_input = build_input_layers(request.product_brief, assets)
+    if layered_input.get("brief_asset_count") or layered_input.get("wireframe_asset_count"):
+        append_log(
+            run_id,
+            "Workflow",
+            "Brief Excel / wireframe 已转为分层输入，不再直接拼接原文进 brief",
+            input_layers_log_payload(layered_input),
         )
 
     try:
@@ -1007,8 +1014,17 @@ def generate_workflow(
 
     used_model = any(stage.used_model for stage in stages)
     agent_report = "\n\n".join(ctx.report_parts)
-    status = "completed" if used_model else "fallback_completed"
-    summary = "BrandOS 设计任务已完成：含品牌规则分层、页面结构、SVG 预览、Figma/PSD 结构说明、评分与反馈清单。"
+    result_state = spec.get("result_state") if isinstance(spec.get("result_state"), dict) else {}
+    delivery_status = str(result_state.get("delivery_status") or "review_only")
+    if delivery_status == "ready":
+        status = "completed"
+    else:
+        status = "fallback_completed"
+    summary = (
+        "BrandOS 设计任务已完成："
+        f"结果等级 {result_state.get('tier') or '低保真草稿'}，"
+        f"导出状态 {artifact_paths.get('export_status') or 'review_only_bundle'}。"
+    )
     try:
         database.persist_run_completed(
             run_id=run_id,
@@ -1037,6 +1053,8 @@ def generate_workflow(
             output_dir=str(output_dir),
             **artifact_paths,
         ),
+        result_state=sanitize_for_log(spec.get("result_state") or {}),
+        export_review=sanitize_for_log(spec.get("export_review") or {}),
         assets=sanitize_for_log(assets),
         warnings=ctx.warnings,
     )
@@ -1047,6 +1065,7 @@ def download_artifact(run_id: str, name: str) -> FileResponse:
     allowed = {
         "preview.svg": "image/svg+xml",
         "design_spec.json": "application/json",
+        "output_metadata.json": "application/json",
         "create_detail_page.jsx": "text/plain",
         "create_figma_page.ts": "text/plain",
         "editable_detail_page.html": "text/html",

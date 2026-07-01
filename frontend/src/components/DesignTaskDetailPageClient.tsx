@@ -5,9 +5,13 @@ import { useMemo, useState } from "react";
 import {
   artifactUrl,
   createWorkflowFeedback,
+  type ExportPreflight,
+  type ExportReview,
+  type ResultState,
   type WorkflowDetailResponse,
 } from "@/lib/api";
 import { StageTimeline } from "./StageTimeline";
+import { WorkflowResultStateSummary } from "./WorkflowResultStateSummary";
 
 const WORKFLOW_DRAFT_KEY = "brandos.workflow.createTaskDraft.v1";
 
@@ -43,12 +47,50 @@ function buildArtifactLink(runId: string, absolutePath?: string | null) {
   return name ? artifactUrl(runId, name) : "";
 }
 
+function readStructuredObject<T>(value: unknown) {
+  return value && typeof value === "object" ? (value as T) : null;
+}
+
+function exportStatusLabel(status?: string | null) {
+  const map: Record<string, string> = {
+    completed: "已完成正式导出",
+    script_ready: "脚本导出就绪",
+    review_only_bundle: "仅输出审稿包",
+    blocked_review_bundle: "导出已阻断",
+  };
+  return map[status ?? ""] ?? (status || "-");
+}
+
 export function DesignTaskDetailPageClient({ initialData }: { initialData: WorkflowDetailResponse }) {
   const [feedbackNotes, setFeedbackNotes] = useState("");
   const [feedbackAuthor, setFeedbackAuthor] = useState("designer");
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackItems, setFeedbackItems] = useState(initialData.feedback);
   const [error, setError] = useState<string | null>(null);
+  const resultState = useMemo(
+    () =>
+      initialData.resultState ??
+      readStructuredObject<ResultState>(initialData.designSpec?.result_state),
+    [initialData.resultState, initialData.designSpec],
+  );
+  const exportReview = useMemo(
+    () =>
+      initialData.exportReview ??
+      initialData.artifacts?.exportReview ??
+      readStructuredObject<ExportReview>(initialData.designSpec?.export_review),
+    [initialData.artifacts?.exportReview, initialData.designSpec, initialData.exportReview],
+  );
+  const exportPreflight = useMemo(
+    () =>
+      initialData.artifacts?.exportPreflight ??
+      resultState?.export_preflight ??
+      readStructuredObject<ExportPreflight>(
+        readStructuredObject<ResultState>(initialData.designSpec?.result_state)?.export_preflight,
+      ) ??
+      null,
+    [initialData.artifacts?.exportPreflight, initialData.designSpec, resultState],
+  );
+  const inputLayers = initialData.inputLayers ?? null;
 
   const previewUrl = useMemo(
     () =>
@@ -89,6 +131,13 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
     () =>
       initialData.artifacts?.readme
         ? buildArtifactLink(initialData.runId, initialData.artifacts.readme)
+        : "",
+    [initialData],
+  );
+  const outputMetadataUrl = useMemo(
+    () =>
+      initialData.artifacts?.outputMetadata
+        ? buildArtifactLink(initialData.runId, initialData.artifacts.outputMetadata)
         : "",
     [initialData],
   );
@@ -176,10 +225,11 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
           <div className="muted-text">任务完成或终止时间</div>
         </article>
         <article className="info-card">
-          <div className="eyebrow">导出模式</div>
-          <div className="big-metric detail-metric">{initialData.artifacts?.exportMode || "script"}</div>
+          <div className="eyebrow">结果等级</div>
+          <div className="big-metric detail-metric">{String(resultState?.tier || "-")}</div>
           <div className="muted-text">
-            {initialData.artifacts?.exportStatus || "fallback_script"}
+            {resultState?.delivery_status ? `交付判定：${String(resultState.delivery_status)}` : "暂无"}
+            {resultState?.error_code ? ` / ${String(resultState.error_code)}` : ""}
           </div>
         </article>
       </section>
@@ -205,8 +255,27 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
         </section>
       ) : null}
 
+      <WorkflowResultStateSummary
+        exportPreflight={exportPreflight}
+        exportReview={exportReview}
+        resultState={resultState}
+      />
+
       <section className="panel content-panel">
         <div className="card-label">导出产物</div>
+        <p className="hint">
+          导出状态：{exportStatusLabel(initialData.artifacts?.exportStatus)}
+          {initialData.artifacts?.exportMode ? ` / ${initialData.artifacts.exportMode}` : ""}
+          {initialData.artifacts?.exportError ? ` / ${initialData.artifacts.exportError}` : ""}
+        </p>
+        {exportReview?.message ? (
+          <p className="hint">
+            导出建议：{String(exportReview.message)}
+            {Array.isArray(exportReview.recommended_actions) && exportReview.recommended_actions.length
+              ? ` / 下一步：${String(exportReview.recommended_actions[0])}`
+              : ""}
+          </p>
+        ) : null}
         <div className="downloads">
           {previewUrl ? (
             <a className="download" href={previewUrl} rel="noreferrer" target="_blank">
@@ -242,6 +311,11 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
               <FileText size={14} /> README
             </a>
           ) : null}
+          {outputMetadataUrl ? (
+            <a className="download" href={outputMetadataUrl} rel="noreferrer" target="_blank">
+              <Download size={14} /> 输出元数据
+            </a>
+          ) : null}
         </div>
       </section>
 
@@ -258,6 +332,15 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
         </section>
         <section className="stages-card">
           <div className="card-label">Agent 执行时间线</div>
+          {resultState ? (
+            <p className="hint">
+              布局校验：{String(resultState.layout_validation_status || "-")} / Asset Guard：
+              {String(resultState.asset_guard_status || "-")}
+              {typeof resultState.slot_match_rate === "number"
+                ? ` / 槽位命中率：${Math.round(Number(resultState.slot_match_rate) * 100)}%`
+                : ""}
+            </p>
+          ) : null}
           <StageTimeline stages={initialData.stages} />
         </section>
       </div>
@@ -276,6 +359,37 @@ export function DesignTaskDetailPageClient({ initialData }: { initialData: Workf
           <pre className="workflow-log">{JSON.stringify(initialData.requestPayload, null, 2)}</pre>
         </section>
       </div>
+
+      {inputLayers ? (
+        <section className="panel content-panel">
+          <div className="card-label">输入分层</div>
+          <p className="hint">
+            来源：{inputLayers.source} / brief 资产：{inputLayers.brief_asset_count} / wireframe 资产：
+            {inputLayers.wireframe_asset_count}
+            {inputLayers.raw_wireframe_dump_truncated
+              ? ` / raw dump 已裁剪（原始 ${inputLayers.raw_wireframe_dump_chars} 字符）`
+              : ""}
+          </p>
+          {inputLayers.brief_summary ? (
+            <details open>
+              <summary>brief_summary</summary>
+              <pre className="workflow-log">{inputLayers.brief_summary}</pre>
+            </details>
+          ) : null}
+          {inputLayers.layout_reference ? (
+            <details open>
+              <summary>layout_reference</summary>
+              <pre className="workflow-log">{inputLayers.layout_reference}</pre>
+            </details>
+          ) : null}
+          {inputLayers.raw_wireframe_dump ? (
+            <details>
+              <summary>raw_wireframe_dump</summary>
+              <pre className="workflow-log">{inputLayers.raw_wireframe_dump}</pre>
+            </details>
+          ) : null}
+        </section>
+      ) : null}
 
       <section className="panel content-panel">
         <div className="card-label">设计反馈沉淀</div>

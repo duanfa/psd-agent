@@ -907,6 +907,11 @@ button {
   text-decoration: underline;
 }
 
+.task-summary-cell {
+  min-width: 360px;
+  white-space: normal !important;
+}
+
 .rule-table .rule-description-cell {
   min-width: 420px;
   white-space: normal;
@@ -2329,6 +2334,98 @@ button {
   margin: 0;
   color: var(--muted);
   font-size: 12.5px;
+}
+
+.result-state-header,
+.status-code-group,
+.status-note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.result-state-topline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.result-state-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.result-state-compact-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.result-state-compact-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.result-state-inline-placeholder {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.result-state-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.result-state-check {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #f8fafc;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.status-code-chip {
+  background: #f8fafc;
+}
+
+.status-note-list.compact {
+  margin-top: -2px;
+}
+
+.result-state-notes {
+  display: grid;
+  gap: 10px;
+}
+
+.status-note-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: #475569;
+}
+
+.status-note-item strong {
+  color: #0f172a;
+  font-size: 12px;
+}
+
+.record-item-compact {
+  gap: 10px;
 }
 
 /* ---------- switch ---------- */

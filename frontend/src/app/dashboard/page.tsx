@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { fetchDashboard } from "@/lib/api";
+import { DashboardRecentDesignTasks } from "@/components/DashboardRecentDesignTasks";
 
 function statusClass(status: string) {
   if (status.includes("成功") || status.includes("稳定") || status.includes("completed")) {
@@ -108,19 +109,7 @@ export default async function DashboardPage() {
               查看全部任务
             </Link>
           </div>
-          <div className="record-list">
-            {data.designTasks.map((item) => (
-              <div className="record-item" key={item.title}>
-                <div className="split-line">
-                  <strong>{item.title}</strong>
-                  <span className={`status-pill ${statusClass(item.status)}`}>
-                    {statusLabel(item.status)}
-                  </span>
-                </div>
-                <div className="subtitle">{item.summary}</div>
-              </div>
-            ))}
-          </div>
+          <DashboardRecentDesignTasks initialTasks={data.designTasks} />
         </section>
       </div>
 

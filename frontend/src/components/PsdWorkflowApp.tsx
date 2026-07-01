@@ -25,6 +25,8 @@ import {
   artifactUrl,
   cancelWorkflow,
   createWorkflowFeedback,
+  type ExportPreflight,
+  type ExportReview,
   fetchBrandRuleOptions,
   fetchDefaults,
   fetchWorkflowFeedback,
@@ -34,6 +36,7 @@ import {
   type BrandRuleOption,
   type OutputType,
   type RequirementConstraints,
+  type ResultState,
   type StageMeta,
   type WorkflowPayload,
   type WorkflowResult,
@@ -42,6 +45,7 @@ import { PipelineRibbon } from "./PipelineRibbon";
 import { ModelTestPanel } from "./ModelTestPanel";
 import { Section } from "./Section";
 import { StageTimeline } from "./StageTimeline";
+import { WorkflowResultStateSummary } from "./WorkflowResultStateSummary";
 
 const FALLBACK_STAGES: StageMeta[] = [
   { id: "product_understanding", title: "商品理解 Agent", icon: "eye" },
@@ -162,6 +166,20 @@ function formatDraftTime(value: string | null) {
   return `草稿已保存 ${new Date(value).toLocaleString("zh-CN", { hour12: false })}`;
 }
 
+function readStructuredObject<T>(value: unknown) {
+  return value && typeof value === "object" ? (value as T) : null;
+}
+
+function exportStatusLabel(status?: string | null) {
+  const map: Record<string, string> = {
+    completed: "已完成正式导出",
+    script_ready: "脚本导出就绪",
+    review_only_bundle: "仅输出审稿包",
+    blocked_review_bundle: "导出已阻断",
+  };
+  return map[status ?? ""] ?? (status || "-");
+}
+
 export function PsdWorkflowApp() {
   const [payload, setPayload] = useState<WorkflowPayload | null>(null);
   const [stages, setStages] = useState<StageMeta[]>(FALLBACK_STAGES);
@@ -258,6 +276,27 @@ export function PsdWorkflowApp() {
   const selectedStage = useMemo(
     () => stages.find((stage) => stage.id === selectedStageId),
     [selectedStageId, stages],
+  );
+  const resultState = useMemo(
+    () => result?.result_state ?? readStructuredObject<ResultState>(result?.design_spec?.result_state),
+    [result],
+  );
+  const exportReview = useMemo(
+    () =>
+      result?.export_review ??
+      result?.artifacts.export_review ??
+      readStructuredObject<ExportReview>(result?.design_spec?.export_review),
+    [result],
+  );
+  const exportPreflight = useMemo(
+    () =>
+      result?.artifacts.export_preflight ??
+      resultState?.export_preflight ??
+      readStructuredObject<ExportPreflight>(
+        readStructuredObject<ResultState>(result?.design_spec?.result_state)?.export_preflight,
+      ) ??
+      null,
+    [result, resultState],
   );
 
   const timelineStages = loading || liveStages.length ? liveStages : result?.stages ?? [];
@@ -1298,13 +1337,36 @@ export function PsdWorkflowApp() {
               <div className="result">
                 <p className="result-summary">{result.summary}</p>
                 {workflowFailureReason ? <div className="error">故障分类：{workflowFailureReason}</div> : null}
+                {resultState ? (
+                  <div className="hint">
+                    结果等级：{String(resultState.tier || "-")}
+                    {resultState.delivery_status ? ` / 交付判定：${String(resultState.delivery_status)}` : ""}
+                    {typeof resultState.slot_match_rate === "number"
+                      ? ` / 槽位命中率：${Math.round(Number(resultState.slot_match_rate) * 100)}%`
+                      : ""}
+                  </div>
+                ) : null}
                 {result.artifacts.export_status ? (
                   <p className="hint">
-                    导出状态：{result.artifacts.export_status}
+                    导出状态：{exportStatusLabel(result.artifacts.export_status)}
                     {result.artifacts.export_mode ? ` / ${result.artifacts.export_mode}` : ""}
                     {result.artifacts.export_error ? ` / ${result.artifacts.export_error}` : ""}
                   </p>
                 ) : null}
+                {exportReview?.message ? (
+                  <p className="hint">
+                    导出建议：{String(exportReview.message)}
+                    {Array.isArray(exportReview.recommended_actions) && exportReview.recommended_actions.length
+                      ? ` / 下一步：${String(exportReview.recommended_actions[0])}`
+                      : ""}
+                  </p>
+                ) : null}
+                <WorkflowResultStateSummary
+                  exportPreflight={exportPreflight}
+                  exportReview={exportReview}
+                  resultState={resultState}
+                  title="结构化结果摘要"
+                />
 
                 <div className="downloads">
                   <a
@@ -1366,6 +1428,16 @@ export function PsdWorkflowApp() {
                   >
                     <FileText size={14} /> README
                   </a>
+                  {result.artifacts.output_metadata ? (
+                    <a
+                      className="download"
+                      href={artifactUrl(result.run_id, "output_metadata.json")}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <Download size={14} /> 输出元数据
+                    </a>
+                  ) : null}
                   <a className="download" href={`/design-tasks/${result.run_id}`}>
                     <BookOpen size={14} /> 任务详情
                   </a>

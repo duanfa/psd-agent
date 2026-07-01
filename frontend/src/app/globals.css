@@ -2203,8 +2203,12 @@ button {
   line-height: 1.55;
 }
 
+.field textarea.brand-guidelines-textarea {
+  min-height: 368px;
+}
+
 .field textarea.prompt {
-  min-height: 110px;
+  min-height: 440px;
   font-size: 13px;
 }
 

@@ -140,6 +140,7 @@ class UploadedAsset(BaseModel):
     size: int = 0
     saved_path: str | None = None
     extracted_text: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     bucket: str = "reference"
 
 

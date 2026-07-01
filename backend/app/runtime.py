@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from . import database
@@ -20,15 +23,28 @@ def reset_run(run_id: str) -> None:
 
 
 def sanitize_for_log(value: Any) -> Any:
-    if isinstance(value, dict):
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            return sanitize_for_log(value.model_dump(mode="json"))
+        except Exception:
+            return sanitize_for_log(value.model_dump())
+    if isinstance(value, Mapping):
         if "image_url" in value:
             image_url = value.get("image_url") or {}
             url = image_url.get("url", "") if isinstance(image_url, dict) else str(image_url)
-            return {**value, "image_url": f"<image data url omitted, length={len(str(url))}>"}
+            sanitized = {key: sanitize_for_log(item) for key, item in value.items()}
+            sanitized["image_url"] = f"<image data url omitted, length={len(str(url))}>"
+            return sanitized
         return {key: sanitize_for_log(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, list | tuple | set):
         return [sanitize_for_log(item) for item in value]
-    return value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
 
 
 def append_log(run_id: str, scope: str, title: str, payload: Any | None = None) -> None:

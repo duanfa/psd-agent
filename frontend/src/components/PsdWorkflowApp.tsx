@@ -712,6 +712,7 @@ export function PsdWorkflowApp() {
                   <p className="hint">{brandRulesError}</p>
                 ) : null}
                 <textarea
+                  className="brand-guidelines-textarea"
                   value={payload.brand_guidelines}
                   onChange={(e) => setField("brand_guidelines", e.target.value)}
                 />

@@ -130,7 +130,8 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
     modules = []
     for module in ctx.modules:
         enriched = dict(module)
-        enriched["render_plan"] = _module_render_plan(enriched, req.layout.canvas_width)
+        if not isinstance(enriched.get("render_plan"), dict):
+            enriched["render_plan"] = _module_render_plan(enriched, req.layout.canvas_width)
         modules.append(enriched)
     total_height = sum(int(m["height"]) for m in modules) or req.layout.hero_height
     return {
@@ -165,6 +166,22 @@ def build_design_spec(ctx: PipelineContext) -> dict[str, Any]:
         "modules": modules,
         "psd_layers": ctx.psd_layers,
         "design_score": ctx.design_score,
+        "layout_validation": ctx.layout_validation,
+        "asset_match_report": ctx.asset_match_report,
+        "intermediate_preview": {
+            "product_brief": ctx.structured_info,
+            "selected_rules": {
+                "core_rule_id": ctx.core_rule.get("id"),
+                "core_rule_version": ctx.core_rule.get("version"),
+                "detail_rule_id": ctx.detail_page_rule.get("id"),
+                "detail_rule_version": ctx.detail_page_rule.get("version"),
+            },
+            "module_count": len(modules),
+            "image_slot_count": sum(len(m.get("image_slots") or []) for m in modules),
+            "text_layer_count": sum(len(m.get("text_layers") or []) for m in modules),
+            "asset_match_status": ctx.asset_match_report.get("status"),
+            "layout_validation_status": ctx.layout_validation.get("status"),
+        },
         "outputs": ctx.outputs,
         "review_checklist": ctx.outputs.get("review_checklist", []),
         "feedback_capture": ctx.outputs.get("feedback_capture", {}),
@@ -262,6 +279,32 @@ def _resolve_module_images(
 
         if chosen:
             module["image_file"] = chosen
+            for slot_index, slot in enumerate(module.get("image_slots") or []):
+                if not isinstance(slot, dict):
+                    continue
+                slot_role = str(slot.get("role") or module.get("role") or "")
+                preferred = [
+                    name
+                    for name in available
+                    if _asset_role_from_name(name) == slot_role or slot_role in _asset_role_from_name(name)
+                ]
+                pool = preferred or available
+                slot["image_file"] = rel_paths[pool[slot_index % len(pool)]]
+
+
+def _asset_role_from_name(name: str) -> str:
+    lower = name.lower()
+    if any(token in lower for token in ("人气", "recommend", "panenka", "campo", "conder", "kids", "v90")):
+        return "recommendation"
+    if any(token in lower for token in ("model", "routine", "moves", "小红书", "lifestyle", "场景", "搭配")):
+        return "lifestyle"
+    if any(token in lower for token in ("size", "尺码", "参数")):
+        return "size"
+    if any(token in lower for token in ("brand", "story", "logo")):
+        return "brand_story"
+    if any(token in lower for token in ("volley", "packshot", "product", "产品")):
+        return "product_gallery"
+    return "detail"
 
 
 def _image_data_url(output_dir: Path, relative_path: str) -> str | None:
@@ -314,6 +357,61 @@ def render_preview_svg(spec: dict[str, Any], output_dir: Path | None = None) -> 
         else:
             card_bg = "#ffffff" if module["index"] % 2 else "#f4f6f8"
             blocks.append(f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="{card_bg}" />')
+
+        if str(plan.get("variant") or "") == "schema_absolute":
+            schema_bg = str(plan.get("background_color") or ("#ffffff" if module["index"] % 2 else "#f7f7f4"))
+            blocks.append(f'<rect x="0" y="{y}" width="{width}" height="{h}" fill="{_esc(schema_bg)}" />')
+            for slot_index, slot in enumerate(plan.get("image_slots") or module.get("image_slots") or [], start=1):
+                if not isinstance(slot, dict):
+                    continue
+                img_x = int(slot.get("x") or 0)
+                img_y = y + int(slot.get("y") or 0)
+                img_w = max(1, int(slot.get("w") or 1))
+                img_h = max(1, int(slot.get("h") or 1))
+                image_file = slot.get("image_file") or module.get("image_file")
+                data_url = _image_data_url(output_dir, str(image_file)) if output_dir and image_file else None
+                clip_id = f'schema-clip-{module["index"]}-{slot_index}'
+                if data_url:
+                    blocks.append(f'<clipPath id="{clip_id}"><rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" rx="0" /></clipPath>')
+                    blocks.append(
+                        f'<image x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
+                        f'href="{data_url}" preserveAspectRatio="xMidYMid slice" clip-path="url(#{clip_id})" />'
+                    )
+                else:
+                    blocks.append(
+                        f'<rect x="{img_x}" y="{img_y}" width="{img_w}" height="{img_h}" '
+                        f'fill="#eef2f7" stroke="#cbd5e1" stroke-dasharray="8 6" />'
+                    )
+                    blocks.append(
+                        f'<text x="{img_x + 16}" y="{img_y + 28}" font-size="14" '
+                        f'font-family="sans-serif" fill="#94a3b8">{_esc(slot.get("role") or "image_slot")}</text>'
+                    )
+            schema_text_layers = plan.get("text_layers") or module.get("text_layers") or []
+            if schema_text_layers:
+                for layer in schema_text_layers:
+                    if not isinstance(layer, dict):
+                        continue
+                    text = str(layer.get("text") or "")
+                    if not text:
+                        continue
+                    layer_x = int(layer.get("x") or 40)
+                    layer_y = y + int(layer.get("y") or 40)
+                    layer_size = max(12, min(56, int(float(layer.get("font_size") or body_size))))
+                    layer_w = max(80, int(layer.get("w") or width - 80))
+                    for line_index, line in enumerate(_wrap(text, max(8, layer_w // max(8, int(layer_size * 0.62))))[:3]):
+                        blocks.append(
+                            f'<text x="{layer_x}" y="{layer_y + line_index * int(layer_size * 1.4)}" '
+                            f'font-size="{layer_size}" font-family="PingFang SC, Microsoft YaHei, sans-serif" '
+                            f'fill="{title_color}">{_esc(line)}</text>'
+                        )
+            else:
+                blocks.append(
+                    f'<text x="40" y="{y + 64}" font-size="{title_size}" font-weight="700" '
+                    f'font-family="PingFang SC, Microsoft YaHei, sans-serif" fill="{title_color}">'
+                    f'{_esc(copy.get("headline", module["name"]))}</text>'
+                )
+            y += h
+            continue
 
         accent_x = int(text_plan.get("x", 40)) - 16
         accent_y = y + max(26, int(text_plan.get("y", 48)) - 28)
@@ -488,6 +586,61 @@ for (var i = 0; i < spec.modules.length; i++) {
   var group = doc.layerSets.add();
   group.name = m.layer_group;
 
+  if ((plan.variant || "") === "schema_absolute") {
+    var schemaTexts = plan.text_layers || m.text_layers || [];
+    for (var st = 0; st < schemaTexts.length; st++) {
+      var t = schemaTexts[st] || {};
+      addText(
+        group,
+        "TXT_SCHEMA_" + (st + 1),
+        t.text || "",
+        t.x || 40,
+        y + (t.y || 40),
+        Math.max(10, Math.min(56, Number(t.font_size || bodySize))),
+        spec.typography.text_color
+      );
+    }
+    if (!schemaTexts.length) {
+      addText(group, "TXT_主标题", copy.headline || m.name, 40, y + 64, titleSize + 6, spec.typography.text_color);
+    }
+    var schemaSlots = plan.image_slots || m.image_slots || [];
+    for (var ss = 0; ss < schemaSlots.length; ss++) {
+      var slot = schemaSlots[ss] || {};
+      var slotImage = slot.image_file || m.image_file;
+      if (slotImage) {
+        var slotFile = new File((new File($.fileName)).parent.fsName + "/" + slotImage);
+        if (slotFile.exists) {
+          var slotDoc = app.open(slotFile);
+          try {
+            var slotLayer = slotDoc.activeLayer.duplicate(group, ElementPlacement.INSIDE);
+            slotLayer.name = "IMG_SLOT_" + (slot.id || slot.role || (ss + 1));
+            var sx = Number(slot.x || 0);
+            var sy = y + Number(slot.y || 0);
+            var sw = Number(slot.w || 120);
+            var sh = Number(slot.h || 120);
+            var sb = slotLayer.bounds;
+            var slw = sb[2].as("px") - sb[0].as("px");
+            var slh = sb[3].as("px") - sb[1].as("px");
+            if (slw > 0 && slh > 0) {
+              var sscale = Math.max(sw / slw, sh / slh) * 100;
+              slotLayer.resize(sscale, sscale, AnchorPosition.MIDDLECENTER);
+              sb = slotLayer.bounds;
+              slotLayer.translate(sx - sb[0].as("px"), sy - sb[1].as("px"));
+            }
+          } finally {
+            slotDoc.close(SaveOptions.DONOTSAVECHANGES);
+          }
+        }
+      } else {
+        var slotPlaceholder = doc.artLayers.add();
+        slotPlaceholder.name = "IMG_SLOT_PLACEHOLDER_" + (slot.id || slot.role || (ss + 1));
+        slotPlaceholder.move(group, ElementPlacement.INSIDE);
+      }
+    }
+    y += m.height;
+    continue;
+  }
+
   addText(group, "TXT_主标题", copy.headline, textPlan.x, y + textPlan.y, titleSize + 6, spec.typography.text_color);
   addText(group, "TXT_副标题", copy.subtitle, textPlan.x, y + textPlan.y + 50, spec.typography.subtitle_size, spec.canvas.accent_color);
   addText(group, "TXT_正文", copy.body, textPlan.x, y + textPlan.y + 92, bodySize, "#4b5563");
@@ -583,6 +736,38 @@ async function main() {
       : (module.index %% 2 ? "#ffffff" : "#f4f6f8");
     section.fills = [{ type: "SOLID", color: hexToRgb(bgColor) }];
     frame.appendChild(section);
+
+    if ((plan.variant || "") === "schema_absolute") {
+      (plan.image_slots || module.image_slots || []).forEach((slot: any, index: number) => {
+        const imageBox = figma.createRectangle();
+        imageBox.name = `IMG_SLOT_${slot.id || slot.role || index + 1}${slot.image_file ? ` / ${slot.image_file}` : ""}`;
+        imageBox.x = Number(slot.x || 0);
+        imageBox.y = Number(slot.y || 0);
+        imageBox.resize(Math.max(24, Number(slot.w || 120)), Math.max(24, Number(slot.h || 120)));
+        imageBox.fills = [{ type: "SOLID", color: hexToRgb("#e2e8f0") }];
+        imageBox.strokes = [{ type: "SOLID", color: hexToRgb("#cbd5e1") }];
+        section.appendChild(imageBox);
+        addText(section, `IMG_SLOT_LABEL_${index + 1}`, slot.role || slot.asset_type || "image_slot", imageBox.x + 12, imageBox.y + 24, 13, false, "#64748b");
+      });
+      const schemaTexts = plan.text_layers || module.text_layers || [];
+      schemaTexts.forEach((layer: any, index: number) => {
+        addText(
+          section,
+          `TXT_SCHEMA_${index + 1}`,
+          layer.text || "",
+          Number(layer.x || 40),
+          Number(layer.y || 40),
+          Math.max(10, Math.min(56, Number(layer.font_size || spec.typography.body_size + 4))),
+          Boolean(layer.bold),
+          spec.typography.text_color,
+        );
+      });
+      if (!schemaTexts.length) {
+        addText(section, "TXT_主标题", (module.copy || {}).headline || module.name, 40, 64, spec.typography.title_size + 8, true, spec.typography.text_color);
+      }
+      y += module.height;
+      continue;
+    }
 
     const accent = figma.createRectangle();
     accent.name = "BG_品牌强调条";

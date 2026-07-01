@@ -80,6 +80,9 @@ class PipelineContext:
     requirement_constraints: dict[str, Any] = field(default_factory=dict)
     feedback_constraints: dict[str, Any] = field(default_factory=dict)
     effective_constraints: dict[str, Any] = field(default_factory=dict)
+    layout_validation: dict[str, Any] = field(default_factory=dict)
+    asset_match_report: dict[str, Any] = field(default_factory=dict)
+    intermediate_preview: dict[str, Any] = field(default_factory=dict)
 
     @property
     def images(self) -> list[str]:
@@ -497,6 +500,27 @@ def _build_layout_blueprint(
     constraints: dict[str, Any] | None = None,
     strict_mode: bool = False,
 ) -> list[dict[str, Any]]:
+    layout_schema = _extract_layout_schema(detail_page_rule)
+    if layout_schema:
+        sections = layout_schema.get("sections")
+        if isinstance(sections, list) and sections:
+            blueprint = []
+            for index, section in enumerate(sections[:count]):
+                if not isinstance(section, dict):
+                    continue
+                role = _normalize_module_token(str(section.get("component_type") or section.get("id") or section.get("name") or ""))
+                blueprint.append(
+                    {
+                        "name": str(section.get("name") or _role_display_name(role)),
+                        "layer_group": f"{index + 1:02d}_{role.title().replace('_', '')}",
+                        "layout": "schema_absolute",
+                        "role": role if role else ("hero" if index == 0 else "feature"),
+                        "image_role": f"{section.get('name') or _role_display_name(role)}用图",
+                    }
+                )
+            if blueprint:
+                return _renumber_blueprint(blueprint)
+
     if not detail_page_rule:
         if strict_mode:
             raise ValueError("strict_brand 模式要求命中详情页 Derived Rule，不能回退到默认模板")
@@ -557,6 +581,37 @@ def _build_layout_blueprint(
     return _apply_requirement_constraints_to_blueprint(
         blueprint[:count], count, constraints or {}, strict_mode
     )
+
+
+def _rule_items(rule: dict[str, Any], snake_key: str, camel_key: str) -> list[dict[str, Any]]:
+    value = rule.get(snake_key)
+    if value is None:
+        value = rule.get(camel_key)
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _special_rule_payload(rule: dict[str, Any], marker: str, payload_key: str) -> Any:
+    for collection_key in (("design_rules", "designRules"), ("layout_rules", "layoutRules"), ("components", "components")):
+        for item in _rule_items(rule, collection_key[0], collection_key[1]):
+            if str(item.get("title") or "") == marker and payload_key in item:
+                return item.get(payload_key)
+    return None
+
+
+def _extract_layout_schema(rule: dict[str, Any]) -> dict[str, Any]:
+    direct = rule.get("layout_schema") or rule.get("layoutSchema")
+    if isinstance(direct, dict):
+        return direct
+    schema = _special_rule_payload(rule, "__layout_schema__", "schema")
+    return schema if isinstance(schema, dict) else {}
+
+
+def _extract_image_slots(rule: dict[str, Any]) -> list[dict[str, Any]]:
+    direct = rule.get("image_slots") or rule.get("imageSlots")
+    if isinstance(direct, list):
+        return [item for item in direct if isinstance(item, dict)]
+    slots = _special_rule_payload(rule, "__image_slots__", "slots")
+    return [item for item in slots if isinstance(item, dict)] if isinstance(slots, list) else []
 
 
 def _merge_modules_with_blueprint(
@@ -956,12 +1011,27 @@ _FALLBACK_MODULE_TEMPLATES = [
 def stage_layout(ctx: PipelineContext) -> StageResult:
     req = ctx.request
     count = req.layout.module_count
+    layout_schema = _extract_layout_schema(ctx.detail_page_rule)
 
     def model_fn() -> dict[str, Any]:
+        schema_modules = _modules_from_layout_schema(layout_schema, ctx)
+        if schema_modules:
+            ctx.modules = schema_modules
+            ctx.layout_validation = _validate_layout_schema(layout_schema, ctx)
+            ctx.asset_match_report = _build_asset_match_report(ctx.modules, ctx)
+            return {
+                "layout_schema": layout_schema,
+                "layout_validation": ctx.layout_validation,
+                "asset_match_report": ctx.asset_match_report,
+                "modules": ctx.modules,
+                "mode": "executable_schema",
+            }
         prompt = (
             f"设计方向：{json.dumps(ctx.design_direction, ensure_ascii=False)}\n"
             f"品牌模块顺序：{ctx.brand_profile.get('module_order')}\n"
             f"选中的详情页 Derived Rule：{json.dumps(ctx.detail_page_rule, ensure_ascii=False)}\n"
+            f"可执行 Layout Schema：{json.dumps(layout_schema, ensure_ascii=False)}\n"
+            f"图片槽定义：{json.dumps(_extract_image_slots(ctx.detail_page_rule), ensure_ascii=False)}\n"
             f"强布局蓝图：{json.dumps(ctx.layout_blueprint, ensure_ascii=False)}\n"
             f"参考案例图片：{ctx.reference_images}\n"
             f"已生成图片素材：{ctx.generated_image_names}\n"
@@ -984,6 +1054,18 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
         return {"modules": ctx.modules}
 
     def fallback_fn() -> dict[str, Any]:
+        schema_modules = _modules_from_layout_schema(layout_schema, ctx)
+        if schema_modules:
+            ctx.modules = schema_modules
+            ctx.layout_validation = _validate_layout_schema(layout_schema, ctx)
+            ctx.asset_match_report = _build_asset_match_report(ctx.modules, ctx)
+            return {
+                "layout_schema": layout_schema,
+                "layout_validation": ctx.layout_validation,
+                "asset_match_report": ctx.asset_match_report,
+                "modules": ctx.modules,
+                "mode": "executable_schema_fallback",
+            }
         modules = [
             {
                 **item,
@@ -992,7 +1074,30 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
             for item in ctx.layout_blueprint[:count]
         ]
         ctx.modules = _normalize_modules(modules, ctx)
-        return {"modules": ctx.modules}
+        ctx.layout_validation = {
+            "status": "failed",
+            "issues": ["未命中可执行详情页 Derived Rule / layout_schema，Layout Engine 已回退通用模块模板"],
+            "warnings": ["当前结果只能作为低保真草稿，不能视为已执行品牌详情页布局规范"],
+            "section_count": 0,
+            "image_slot_count": 0,
+            "required_asset_roles": [],
+            "available_asset_roles": sorted({_asset_role(name) for name in [*ctx.images, *ctx.reference_images, *ctx.generated_image_names]}),
+            "missing_asset_roles": [],
+        }
+        ctx.asset_match_report = {
+            "status": "skipped",
+            "match_count": 0,
+            "slot_count": 0,
+            "unmatched_slots": [],
+            "matches": [],
+            "reason": "无 image_slots，无法执行语义图片槽匹配",
+        }
+        return {
+            "modules": ctx.modules,
+            "layout_validation": ctx.layout_validation,
+            "asset_match_report": ctx.asset_match_report,
+            "mode": "fallback_blueprint",
+        }
 
     def summarize(data: dict[str, Any], used: bool) -> str:
         names = "、".join(m["name"] for m in data.get("modules", []))
@@ -1037,6 +1142,166 @@ def _normalize_modules(
             }
         )
     return normalized
+
+
+def _asset_role(name: str) -> str:
+    text = name.lower()
+    if any(token in text for token in ("recommend", "人气", "panenka", "campo", "conder", "kids", "v90")):
+        return "recommendation"
+    if any(token in text for token in ("model", "routine", "moves", "小红书", "场景", "搭配", "lifestyle")):
+        return "lifestyle"
+    if any(token in text for token in ("size", "尺码", "参数")):
+        return "size"
+    if any(token in text for token in ("brand", "story", "logo")):
+        return "brand_story"
+    if any(token in text for token in ("_1", "packshot", "product", "产品", "volley")):
+        return "product_gallery"
+    return "detail"
+
+
+def _ranked_image_candidates(role: str, ctx: PipelineContext) -> list[str]:
+    images = ctx.generated_image_names + ctx.images + ctx.reference_images
+    preferred = [name for name in images if _asset_role(name) == role]
+    fallback = [name for name in images if name not in preferred]
+    return preferred + fallback
+
+
+def _modules_from_layout_schema(
+    schema: dict[str, Any],
+    ctx: PipelineContext,
+) -> list[dict[str, Any]]:
+    sections = [item for item in schema.get("sections", []) if isinstance(item, dict)]
+    image_slots = [item for item in schema.get("image_slots", []) if isinstance(item, dict)]
+    text_layers = [item for item in schema.get("text_layers", []) if isinstance(item, dict)]
+    if not sections:
+        return []
+
+    modules: list[dict[str, Any]] = []
+    for index, section in enumerate(sections[: ctx.request.layout.module_count], start=1):
+        section_id = str(section.get("id") or f"section_{index:02d}")
+        role = _normalize_module_token(str(section.get("component_type") or section_id or section.get("name") or "detail"))
+        section_slots = [slot for slot in image_slots if str(slot.get("section_id") or "") == section_id]
+        section_text = [layer for layer in text_layers if str(layer.get("section_id") or "") == section_id]
+        height = section.get("h") or section.get("height") or ctx.request.layout.module_height
+        try:
+            height = int(height)
+        except (TypeError, ValueError):
+            height = ctx.request.layout.module_height
+        background = section.get("background") if isinstance(section.get("background"), dict) else {}
+        primary_slot = section_slots[0] if section_slots else {}
+        slot_role = str(primary_slot.get("role") or role)
+        modules.append(
+            {
+                "index": index,
+                "name": str(section.get("name") or _role_display_name(role)),
+                "layer_group": f"{index:02d}_{role.title().replace('_', '')}",
+                "layout": "schema_absolute",
+                "role": role or ("hero" if index == 1 else "feature"),
+                "height": max(220, min(height, 5000)),
+                "image_role": slot_role,
+                "elements": ["BG_背景", "IMG_图片槽", "TXT_文本层"],
+                "image_candidates": _ranked_image_candidates(slot_role, ctx),
+                "layout_schema_section": section,
+                "image_slots": section_slots,
+                "text_layers": section_text,
+                "render_plan": {
+                    "variant": "schema_absolute",
+                    "background": "schema",
+                    "background_color": background.get("color") or ctx.request.layout.background_color,
+                    "image": {
+                        "enabled": bool(section_slots),
+                        "x": int(primary_slot.get("x") or 40),
+                        "y": int(primary_slot.get("y") or 120),
+                        "w": int(primary_slot.get("w") or max(120, ctx.request.layout.canvas_width - 80)),
+                        "h": int(primary_slot.get("h") or 320),
+                        "fit": primary_slot.get("fit") or "cover",
+                        "crop": primary_slot.get("crop") or "center",
+                    },
+                    "text": {
+                        "x": int((section_text[0] if section_text else {}).get("x") or 40),
+                        "y": int((section_text[0] if section_text else {}).get("y") or 48),
+                        "w": int((section_text[0] if section_text else {}).get("w") or ctx.request.layout.canvas_width - 80),
+                        "align": "left",
+                    },
+                    "text_layers": section_text,
+                    "image_slots": section_slots,
+                    "point_style": "list",
+                },
+            }
+        )
+    return modules
+
+
+def _validate_layout_schema(schema: dict[str, Any], ctx: PipelineContext) -> dict[str, Any]:
+    sections = [item for item in schema.get("sections", []) if isinstance(item, dict)]
+    slots = [item for item in schema.get("image_slots", []) if isinstance(item, dict)]
+    issues: list[str] = []
+    warnings: list[str] = []
+    if not schema:
+        issues.append("未命中可执行 layout_schema")
+    if schema and not sections:
+        issues.append("layout_schema 缺少 sections")
+    if schema and not slots:
+        warnings.append("layout_schema 缺少 image_slots，图片匹配会退回模块级候选")
+    section_ids = {str(item.get("id") or "") for item in sections}
+    for index, section in enumerate(sections, start=1):
+        for key in ("id", "name", "w", "h"):
+            if not section.get(key):
+                warnings.append(f"section[{index}] 缺少 {key}")
+        try:
+            if int(section.get("w") or 0) <= 0 or int(section.get("h") or 0) <= 0:
+                issues.append(f"section[{index}] 宽高无效")
+        except (TypeError, ValueError):
+            issues.append(f"section[{index}] 宽高不是数字")
+    for index, slot in enumerate(slots, start=1):
+        section_id = str(slot.get("section_id") or "")
+        if section_id and section_id not in section_ids:
+            warnings.append(f"image_slot[{index}] 引用不存在的 section_id={section_id}")
+        for key in ("x", "y", "w", "h"):
+            if slot.get(key) is None:
+                warnings.append(f"image_slot[{index}] 缺少 {key}")
+    available_roles = sorted({_asset_role(name) for name in [*ctx.images, *ctx.reference_images, *ctx.generated_image_names]})
+    required_roles = sorted({str(slot.get("role") or slot.get("asset_type") or "detail") for slot in slots})
+    missing_roles = [role for role in required_roles if role not in available_roles and role not in {"detail", "hero"}]
+    return {
+        "status": "failed" if issues else ("warning" if warnings or missing_roles else "passed"),
+        "issues": issues,
+        "warnings": warnings,
+        "section_count": len(sections),
+        "image_slot_count": len(slots),
+        "required_asset_roles": required_roles,
+        "available_asset_roles": available_roles,
+        "missing_asset_roles": missing_roles,
+    }
+
+
+def _build_asset_match_report(modules: list[dict[str, Any]], ctx: PipelineContext) -> dict[str, Any]:
+    matches = []
+    unmatched = []
+    for module in modules:
+        for slot in module.get("image_slots") or []:
+            if not isinstance(slot, dict):
+                continue
+            role = str(slot.get("role") or slot.get("asset_type") or module.get("role") or "detail")
+            candidates = _ranked_image_candidates(role, ctx)
+            chosen = candidates[0] if candidates else ""
+            item = {
+                "slot_id": slot.get("id") or "",
+                "section_id": slot.get("section_id") or "",
+                "role": role,
+                "chosen_asset": chosen,
+                "candidate_count": len(candidates),
+            }
+            matches.append(item)
+            if not chosen:
+                unmatched.append(item)
+    return {
+        "status": "passed" if not unmatched else "warning",
+        "match_count": len(matches) - len(unmatched),
+        "slot_count": len(matches),
+        "unmatched_slots": unmatched,
+        "matches": matches[:120],
+    }
 
 
 def stage_image_generation(ctx: PipelineContext) -> StageResult:
@@ -1256,6 +1521,21 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
         "readability": 88,
         "conversion_score": 86,
     }
+    if ctx.layout_validation.get("status") == "passed":
+        score["layout_quality"] = min(98, score["layout_quality"] + 5)
+    elif ctx.layout_validation.get("status") == "failed":
+        score["layout_quality"] = max(60, score["layout_quality"] - 24)
+    if ctx.asset_match_report.get("status") == "passed" and ctx.asset_match_report.get("slot_count"):
+        score["visual_consistency"] = min(98, score["visual_consistency"] + 4)
+    elif ctx.asset_match_report.get("unmatched_slots"):
+        score["visual_consistency"] = max(60, score["visual_consistency"] - 8)
+    golden_reference_count = len([name for name in ctx.reference_images if any(token in name.lower() for token in ("长图", "golden", "reference", "案例"))])
+    golden_alignment = min(96, 78 + module_count * 2 + golden_reference_count * 8)
+    if ctx.layout_validation.get("status") == "failed":
+        golden_alignment = max(60, golden_alignment - 24)
+    if ctx.asset_match_report.get("status") in {"skipped", "warning"}:
+        golden_alignment = max(60, golden_alignment - 8)
+    score["golden_case_alignment"] = golden_alignment
     score = {key: max(60, value - asset_penalty) for key, value in score.items()}
     overall = round(sum(score.values()) / len(score), 1)
     ctx.design_score = {
@@ -1265,8 +1545,15 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
             "评分用于给设计负责人提供可解释审核依据，不替代人工判断。",
             "品牌匹配优先参考 Core Rule、Derived Rule 与当前页面模板。",
             "缺少商品实拍或场景素材时，视觉一致性和转化评分会被扣分。",
+            "黄金案例匹配优先参考可执行 Layout Schema、图片槽命中率和参考案例输入。",
         ],
-        "blocking_issues": [] if overall >= 85 else ["建议补充高质量商品图后再导出正式设计稿"],
+        "layout_validation": ctx.layout_validation,
+        "asset_match_report": ctx.asset_match_report,
+        "blocking_issues": [
+            *([] if overall >= 85 else ["建议补充高质量商品图后再导出正式设计稿"]),
+            *ctx.layout_validation.get("issues", []),
+            *[f"缺少图片槽素材：{item.get('slot_id') or item.get('role')}" for item in ctx.asset_match_report.get("unmatched_slots", [])[:5]],
+        ],
     }
     summary = f"综合评分 {overall}，品牌匹配 {ctx.design_score['brand_match']}，布局质量 {ctx.design_score['layout_quality']}。"
     ctx.report_parts.append(f"## Design Score\n{summary}")

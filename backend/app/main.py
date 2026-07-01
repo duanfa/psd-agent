@@ -21,7 +21,8 @@ from .llm import LLMClient, LLMUnavailable, resolve_api_key, resolve_base_url
 from .models import UploadedAsset, WorkflowArtifacts, WorkflowRequest, WorkflowResult
 from .pipeline import WorkflowCancelled, classify_asset, run_pipeline
 from .render import build_design_spec, write_artifacts
-from .runtime import append_log, get_run_snapshot, reset_run, set_run_state
+from .runtime import append_log, get_run_snapshot, reset_run, sanitize_for_log, set_run_state
+from .wireframe import parse_wireframe_spec, wireframe_summary_text
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 RUNS_ROOT = APP_ROOT / "runs"
@@ -391,6 +392,35 @@ def _brand_rule_model_result(
         )
     ][: settings.max_vision_images]
 
+    output_schema: dict[str, object] = {
+        "markdown": f"完整 {target_meta['label']} Markdown",
+        "design_rules": [{"title": "规则标题", "description": "规则说明"}],
+        "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
+        "components": [{"title": "组件标题", "description": "组件说明"}],
+        "source_assets": [{"title": "素材名称", "description": "从该素材提取出的规范"}],
+    }
+    if payload.training_target == "detail_page_layout":
+        output_schema.update(
+            {
+                "layout_schema": {
+                    "schema_version": "brandos_layout_schema.v1",
+                    "canvas": {"width": 790, "height_mode": "auto"},
+                    "sections": [],
+                    "image_slots": [],
+                    "text_layers": [],
+                    "component_templates": [],
+                },
+                "image_slots": [],
+            }
+        )
+    else:
+        output_schema["visual_tokens"] = {
+            "colors": [],
+            "typography": {},
+            "spacing": {},
+            "tone": "",
+        }
+
     model_payload = {
         "brand": context["brand"],
         "training_target": payload.training_target,
@@ -411,13 +441,7 @@ def _brand_rule_model_result(
         "linked_core_rule": context["linkedCoreRule"],
         "website_urls": payload.website_urls,
         "training_prompt": payload.prompt,
-        "output_schema": {
-            "markdown": f"完整 {target_meta['label']} Markdown",
-            "design_rules": [{"title": "规则标题", "description": "规则说明"}],
-            "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
-            "components": [{"title": "组件标题", "description": "组件说明"}],
-            "source_assets": [{"title": "素材名称", "description": "从该素材提取出的规范"}],
-        },
+        "output_schema": output_schema,
     }
     append_log(run_id, "BrandRuleTrain", "训练输入上下文", model_payload)
 
@@ -434,7 +458,11 @@ def _brand_rule_model_result(
             "2. 若 base_rule 不为空，叠加历史详情页规则并说明新增模块；若为空，创建全新详情页规则。\n"
             "3. markdown 要包含：训练输入、素材摘要、页面结构、文字排版层级、图片放置区域、留白与栅格、组件模板、禁用项。\n"
             "4. layout_rules 必须明确描述主图区、卖点图区、参数/对比区、CTA 区等位置或比例关系。\n"
-            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            "5. 必须额外输出可执行 layout_schema，包含 sections、image_slots、text_layers、component_templates；"
+            "每个 section 和 slot 尽量给出 x/y/w/h、component_type、background、fit/crop、asset_type。\n"
+            "6. 如果 selected_assets.metadata.wireframe_spec 存在，优先基于其中的 drawing object、cell box、merged range、media path 抽取 layout_schema。\n"
+            "7. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description；"
+            "layout_schema 和 image_slots 作为 JSON 字段单独输出。\n\n"
             f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
         )
     else:
@@ -449,7 +477,8 @@ def _brand_rule_model_result(
             "2. 若 base_rule 不为空，叠加历史品牌规则并说明新增规范；若为空，创建全新品牌核心规则。\n"
             "3. markdown 要包含：训练输入、素材摘要、品牌视觉规范、色彩/字体/语气、禁用项、供页面规则继承的品牌级布局倾向。\n"
             "4. 不要把具体商品详情页模块当成唯一模板写死在 Core Rule 中。\n"
-            "5. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
+            "5. 必须额外输出 visual_tokens，包含 colors、typography、spacing、tone、do/dont 等可执行视觉 Token。\n"
+            "6. design_rules/layout_rules/components/source_assets 都必须是数组，每项包含 title 和 description。\n\n"
             f"{json.dumps(model_payload, ensure_ascii=False, indent=2)}"
         )
     try:
@@ -643,7 +672,8 @@ def _extract_spreadsheet_text(path: Path) -> str | None:
                     count += 1
                 if count >= 120:
                     break
-        return "\n".join(lines)[:16000]
+        wireframe = wireframe_summary_text(parse_wireframe_spec(path))
+        return "\n".join([*lines, wireframe]).strip()[:24000]
     except Exception:
         return None
 
@@ -660,6 +690,15 @@ def _save_assets(
         target = input_dir / filename
         with target.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+        wireframe_spec = parse_wireframe_spec(target)
+        metadata: dict[str, object] = {}
+        if wireframe_spec:
+            metadata["wireframe_spec"] = wireframe_spec
+            metadata["wireframe_summary"] = {
+                "sheet_count": len(wireframe_spec.get("sheets") or []),
+                "media_count": wireframe_spec.get("media_count", 0),
+                "drawing_object_count": wireframe_spec.get("drawing_object_count", 0),
+            }
         assets.append(
             UploadedAsset(
                 name=filename,
@@ -667,6 +706,7 @@ def _save_assets(
                 size=target.stat().st_size,
                 saved_path=str(target),
                 extracted_text=_extract_spreadsheet_text(target),
+                metadata=metadata,
                 bucket=bucket_override or classify_asset(filename, file.content_type),
             )
         )
@@ -688,17 +728,36 @@ def _merge_payload(incoming: dict) -> dict:
     return data
 
 
+def _looks_like_example_brief(brief: str, product_name: str) -> bool:
+    text = (brief or "").strip()
+    if not text:
+        return False
+    product = (product_name or "").strip()
+    example_markers = ("商品类型：香薰机", "商品类型：电脑包", "轻量通勤", "静音运行", "持久扩香")
+    has_example_marker = any(marker in text for marker in example_markers)
+    return has_example_marker and (not product or product not in text)
+
+
 def _validate_workflow_rule_selection(
     request: WorkflowRequest,
     selected_rule_context: dict[str, object],
 ) -> None:
     core_rule = dict(selected_rule_context.get("coreRule") or {})
     detail_rule = dict(selected_rule_context.get("detailPageRule") or {})
+    produces_detail_page = any(item.value == "detail_page" for item in request.output_types)
 
     if request.selected_core_rule_id and not core_rule:
         raise HTTPException(status_code=422, detail="所选品牌 Core Rule 未命中，请重新选择后再生成")
     if request.selected_detail_page_rule_id and not detail_rule:
         raise HTTPException(status_code=422, detail="所选详情页 Derived Rule 未命中，请重新选择后再生成")
+    if produces_detail_page and core_rule and not detail_rule:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "当前品牌已命中 Core Rule，但没有已发布的详情页布局规范。"
+                "请先在规则训练中选择“详情页布局规范”目标，训练并发布 active Derived Rule 后再生成详情页。"
+            ),
+        )
 
     if request.workflow_mode.value != "strict_brand":
         return
@@ -856,6 +915,7 @@ def generate_workflow(
         selected_rule_context = database.get_workflow_rule_context(
             core_rule_id=request.selected_core_rule_id,
             detail_page_rule_id=request.selected_detail_page_rule_id,
+            brand_name=request.brand_name,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -890,6 +950,14 @@ def generate_workflow(
         asset.extracted_text or "" for asset in assets if asset.extracted_text
     ).strip()
     if spreadsheet_text and spreadsheet_text not in request.product_brief:
+        if _looks_like_example_brief(request.product_brief, request.product_name):
+            append_log(
+                run_id,
+                "Workflow",
+                "检测到示例 Product Brief 与当前商品不匹配，已在追加 Excel 前清空默认示例 brief",
+                {"removed_brief": request.product_brief[:500], "product_name": request.product_name},
+            )
+            request.product_brief = ""
         parsed_brief_assets = [
             {
                 "name": asset.name,
@@ -961,15 +1029,15 @@ def generate_workflow(
         status=status,
         summary=summary,
         used_deepagents=used_model,
-        stages=stages,
+        stages=sanitize_for_log(stages),
         agent_report=agent_report,
-        design_spec=spec,
+        design_spec=sanitize_for_log(spec),
         artifacts=WorkflowArtifacts(
             run_id=run_id,
             output_dir=str(output_dir),
             **artifact_paths,
         ),
-        assets=assets,
+        assets=sanitize_for_log(assets),
         warnings=ctx.warnings,
     )
 

@@ -1841,22 +1841,30 @@ def _score_rule_quality(
     )
     checks = {
         "has_visual_tokens": isinstance(visual_tokens, dict),
-        "has_layout_schema": isinstance(layout_schema, dict),
-        "has_sections": isinstance(layout_schema, dict) and bool(layout_schema.get("sections")),
-        "has_image_slots": isinstance(image_slots, list) and bool(image_slots),
+        "has_layout_schema": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or isinstance(layout_schema, dict),
+        "has_sections": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or (isinstance(layout_schema, dict) and bool(layout_schema.get("sections"))),
+        "has_image_slots": target_key != RULE_TARGET_DETAIL_PAGE_LAYOUT or (isinstance(image_slots, list) and bool(image_slots)),
         "has_components": bool([item for item in components if not str(item.get("title") or "").startswith("__")]),
         "has_human_readable_rules": bool(
             [item for item in [*design_rules, *layout_rules] if not str(item.get("title") or "").startswith("__")]
         ),
     }
-    weights = {
-        "has_visual_tokens": 18 if target_key == RULE_TARGET_BRAND_CORE else 8,
-        "has_layout_schema": 20 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
-        "has_sections": 18 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
-        "has_image_slots": 18 if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT else 8,
-        "has_components": 12,
-        "has_human_readable_rules": 14,
-    }
+    weights = (
+        {
+            "has_visual_tokens": 45,
+            "has_components": 20,
+            "has_human_readable_rules": 35,
+        }
+        if target_key == RULE_TARGET_BRAND_CORE
+        else {
+            "has_visual_tokens": 5,
+            "has_layout_schema": 30,
+            "has_sections": 25,
+            "has_image_slots": 25,
+            "has_components": 8,
+            "has_human_readable_rules": 7,
+        }
+    )
     score = sum(weight for key, weight in weights.items() if checks.get(key))
     max_score = sum(weights.values())
     overall = round(score / max_score * 100, 1)
@@ -2197,13 +2205,14 @@ def _normalize_rule_items(value: Any, fallback: list[dict[str, Any]]) -> list[di
 def _normalize_model_rule_content(
     model_result: dict[str, Any],
     fallback: dict[str, Any],
+    target_key: str,
 ) -> dict[str, Any]:
     design_rules = _normalize_rule_items(model_result.get("design_rules"), fallback["design_rules"])
     layout_rules = _normalize_rule_items(model_result.get("layout_rules"), fallback["layout_rules"])
     components = _normalize_rule_items(model_result.get("components"), fallback["components"])
 
     visual_tokens = model_result.get("visual_tokens")
-    if isinstance(visual_tokens, dict):
+    if target_key == RULE_TARGET_BRAND_CORE and isinstance(visual_tokens, dict):
         design_rules.append(
             {
                 "title": "__visual_tokens__",
@@ -2213,7 +2222,7 @@ def _normalize_model_rule_content(
         )
 
     layout_schema = model_result.get("layout_schema")
-    if isinstance(layout_schema, dict):
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(layout_schema, dict):
         layout_rules.append(
             {
                 "title": "__layout_schema__",
@@ -2223,12 +2232,21 @@ def _normalize_model_rule_content(
         )
 
     image_slots = model_result.get("image_slots")
-    if isinstance(image_slots, list):
+    if target_key == RULE_TARGET_DETAIL_PAGE_LAYOUT and isinstance(image_slots, list):
         components.append(
             {
                 "title": "__image_slots__",
                 "description": "可执行图片槽定义，供素材匹配与裁切使用。",
                 "slots": image_slots,
+            }
+        )
+    if target_key == RULE_TARGET_BRAND_CORE and (
+        isinstance(layout_schema, dict) or isinstance(image_slots, list)
+    ):
+        design_rules.append(
+            {
+                "title": "__ignored_page_schema__",
+                "description": "模型在 Core Rule 中返回了页面 layout_schema/image_slots，已忽略；请使用“详情页布局规范”训练目标生成 Derived Rule。",
             }
         )
 
@@ -2288,7 +2306,7 @@ def train_brand_rule_version(
             training_target=target_key,
         )
         if model_result:
-            generated = _normalize_model_rule_content(model_result, generated)
+            generated = _normalize_model_rule_content(model_result, generated, target_key)
         design_rules = generated["design_rules"]
         layout_rules = generated["layout_rules"]
         components = generated["components"]

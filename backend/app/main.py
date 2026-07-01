@@ -392,6 +392,35 @@ def _brand_rule_model_result(
         )
     ][: settings.max_vision_images]
 
+    output_schema: dict[str, object] = {
+        "markdown": f"完整 {target_meta['label']} Markdown",
+        "design_rules": [{"title": "规则标题", "description": "规则说明"}],
+        "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
+        "components": [{"title": "组件标题", "description": "组件说明"}],
+        "source_assets": [{"title": "素材名称", "description": "从该素材提取出的规范"}],
+    }
+    if payload.training_target == "detail_page_layout":
+        output_schema.update(
+            {
+                "layout_schema": {
+                    "schema_version": "brandos_layout_schema.v1",
+                    "canvas": {"width": 790, "height_mode": "auto"},
+                    "sections": [],
+                    "image_slots": [],
+                    "text_layers": [],
+                    "component_templates": [],
+                },
+                "image_slots": [],
+            }
+        )
+    else:
+        output_schema["visual_tokens"] = {
+            "colors": [],
+            "typography": {},
+            "spacing": {},
+            "tone": "",
+        }
+
     model_payload = {
         "brand": context["brand"],
         "training_target": payload.training_target,
@@ -412,28 +441,7 @@ def _brand_rule_model_result(
         "linked_core_rule": context["linkedCoreRule"],
         "website_urls": payload.website_urls,
         "training_prompt": payload.prompt,
-        "output_schema": {
-            "markdown": f"完整 {target_meta['label']} Markdown",
-            "design_rules": [{"title": "规则标题", "description": "规则说明"}],
-            "layout_rules": [{"title": "布局规则标题", "description": "布局规则说明"}],
-            "components": [{"title": "组件标题", "description": "组件说明"}],
-            "source_assets": [{"title": "素材名称", "description": "从该素材提取出的规范"}],
-            "visual_tokens": {
-                "colors": [],
-                "typography": {},
-                "spacing": {},
-                "tone": "",
-            },
-            "layout_schema": {
-                "schema_version": "brandos_layout_schema.v1",
-                "canvas": {"width": 790, "height_mode": "auto"},
-                "sections": [],
-                "image_slots": [],
-                "text_layers": [],
-                "component_templates": [],
-            },
-            "image_slots": [],
-        },
+        "output_schema": output_schema,
     }
     append_log(run_id, "BrandRuleTrain", "训练输入上下文", model_payload)
 
@@ -720,17 +728,36 @@ def _merge_payload(incoming: dict) -> dict:
     return data
 
 
+def _looks_like_example_brief(brief: str, product_name: str) -> bool:
+    text = (brief or "").strip()
+    if not text:
+        return False
+    product = (product_name or "").strip()
+    example_markers = ("商品类型：香薰机", "商品类型：电脑包", "轻量通勤", "静音运行", "持久扩香")
+    has_example_marker = any(marker in text for marker in example_markers)
+    return has_example_marker and (not product or product not in text)
+
+
 def _validate_workflow_rule_selection(
     request: WorkflowRequest,
     selected_rule_context: dict[str, object],
 ) -> None:
     core_rule = dict(selected_rule_context.get("coreRule") or {})
     detail_rule = dict(selected_rule_context.get("detailPageRule") or {})
+    produces_detail_page = any(item.value == "detail_page" for item in request.output_types)
 
     if request.selected_core_rule_id and not core_rule:
         raise HTTPException(status_code=422, detail="所选品牌 Core Rule 未命中，请重新选择后再生成")
     if request.selected_detail_page_rule_id and not detail_rule:
         raise HTTPException(status_code=422, detail="所选详情页 Derived Rule 未命中，请重新选择后再生成")
+    if produces_detail_page and core_rule and not detail_rule:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "当前品牌已命中 Core Rule，但没有已发布的详情页布局规范。"
+                "请先在规则训练中选择“详情页布局规范”目标，训练并发布 active Derived Rule 后再生成详情页。"
+            ),
+        )
 
     if request.workflow_mode.value != "strict_brand":
         return
@@ -923,6 +950,14 @@ def generate_workflow(
         asset.extracted_text or "" for asset in assets if asset.extracted_text
     ).strip()
     if spreadsheet_text and spreadsheet_text not in request.product_brief:
+        if _looks_like_example_brief(request.product_brief, request.product_name):
+            append_log(
+                run_id,
+                "Workflow",
+                "检测到示例 Product Brief 与当前商品不匹配，已在追加 Excel 前清空默认示例 brief",
+                {"removed_brief": request.product_brief[:500], "product_name": request.product_name},
+            )
+            request.product_brief = ""
         parsed_brief_assets = [
             {
                 "name": asset.name,

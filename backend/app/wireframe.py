@@ -42,6 +42,12 @@ def _safe_text(value: Any) -> str:
     return str(value).strip().replace("\n", " / ") if value not in (None, "") else ""
 
 
+def _safe_json_value(value: Any) -> str | int | float | bool | None:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _rel_targets(zip_file: zipfile.ZipFile, rels_path: str) -> dict[str, str]:
     if rels_path not in zip_file.namelist():
         return {}
@@ -227,11 +233,11 @@ def parse_wireframe_spec(path: Path, max_cells_per_sheet: int = 260) -> dict[str
                                 "h": row_heights[row_idx - 1],
                             },
                             "style": {
-                                "fill": getattr(cell.fill.fgColor, "rgb", None),
-                                "font": cell.font.name,
-                                "font_size": cell.font.sz,
+                                "fill": _safe_json_value(getattr(cell.fill.fgColor, "rgb", None)),
+                                "font": _safe_json_value(cell.font.name),
+                                "font_size": _safe_json_value(cell.font.sz),
                                 "bold": bool(cell.font.bold),
-                                "align": cell.alignment.horizontal,
+                                "align": _safe_json_value(cell.alignment.horizontal),
                             },
                         }
                     )

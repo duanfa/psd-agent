@@ -1074,7 +1074,30 @@ def stage_layout(ctx: PipelineContext) -> StageResult:
             for item in ctx.layout_blueprint[:count]
         ]
         ctx.modules = _normalize_modules(modules, ctx)
-        return {"modules": ctx.modules}
+        ctx.layout_validation = {
+            "status": "failed",
+            "issues": ["未命中可执行详情页 Derived Rule / layout_schema，Layout Engine 已回退通用模块模板"],
+            "warnings": ["当前结果只能作为低保真草稿，不能视为已执行品牌详情页布局规范"],
+            "section_count": 0,
+            "image_slot_count": 0,
+            "required_asset_roles": [],
+            "available_asset_roles": sorted({_asset_role(name) for name in [*ctx.images, *ctx.reference_images, *ctx.generated_image_names]}),
+            "missing_asset_roles": [],
+        }
+        ctx.asset_match_report = {
+            "status": "skipped",
+            "match_count": 0,
+            "slot_count": 0,
+            "unmatched_slots": [],
+            "matches": [],
+            "reason": "无 image_slots，无法执行语义图片槽匹配",
+        }
+        return {
+            "modules": ctx.modules,
+            "layout_validation": ctx.layout_validation,
+            "asset_match_report": ctx.asset_match_report,
+            "mode": "fallback_blueprint",
+        }
 
     def summarize(data: dict[str, Any], used: bool) -> str:
         names = "、".join(m["name"] for m in data.get("modules", []))
@@ -1501,13 +1524,17 @@ def stage_design_score(ctx: PipelineContext) -> StageResult:
     if ctx.layout_validation.get("status") == "passed":
         score["layout_quality"] = min(98, score["layout_quality"] + 5)
     elif ctx.layout_validation.get("status") == "failed":
-        score["layout_quality"] = max(60, score["layout_quality"] - 12)
+        score["layout_quality"] = max(60, score["layout_quality"] - 24)
     if ctx.asset_match_report.get("status") == "passed" and ctx.asset_match_report.get("slot_count"):
         score["visual_consistency"] = min(98, score["visual_consistency"] + 4)
     elif ctx.asset_match_report.get("unmatched_slots"):
         score["visual_consistency"] = max(60, score["visual_consistency"] - 8)
     golden_reference_count = len([name for name in ctx.reference_images if any(token in name.lower() for token in ("长图", "golden", "reference", "案例"))])
     golden_alignment = min(96, 78 + module_count * 2 + golden_reference_count * 8)
+    if ctx.layout_validation.get("status") == "failed":
+        golden_alignment = max(60, golden_alignment - 24)
+    if ctx.asset_match_report.get("status") in {"skipped", "warning"}:
+        golden_alignment = max(60, golden_alignment - 8)
     score["golden_case_alignment"] = golden_alignment
     score = {key: max(60, value - asset_penalty) for key, value in score.items()}
     overall = round(sum(score.values()) / len(score), 1)

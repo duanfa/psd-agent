@@ -1834,6 +1834,171 @@ button {
   line-height: 1.55;
 }
 
+/* ---------- how it works ---------- */
+
+.how-page {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.how-hero {
+  margin-bottom: 0;
+}
+
+.how-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.how-hero-side {
+  width: min(360px, 100%);
+  flex-shrink: 0;
+}
+
+.how-hero-side .info-card {
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.16), transparent 34%),
+    rgba(255, 255, 255, 0.88);
+}
+
+.how-section {
+  margin-top: 0;
+}
+
+.how-step-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.how-step-card,
+.how-priority-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+
+.how-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.how-step-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.how-step-icon,
+.how-input-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.how-step-card h3,
+.how-priority-card h3,
+.how-hero-side h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.how-step-card p,
+.how-priority-card p,
+.how-hero-side p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 13px;
+}
+
+.how-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.how-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.how-list li svg {
+  margin-top: 2px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.how-input-card {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.how-priority-grid,
+.how-script-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.how-priority-1 {
+  border-color: rgba(22, 163, 74, 0.22);
+  background: linear-gradient(180deg, #f0fdf4, #ffffff);
+}
+
+.how-priority-2 {
+  border-color: rgba(79, 70, 229, 0.2);
+  background: linear-gradient(180deg, #eef2ff, #ffffff);
+}
+
+.how-priority-3 {
+  border-color: rgba(217, 119, 6, 0.24);
+  background: linear-gradient(180deg, #fffbeb, #ffffff);
+}
+
+.how-highlight {
+  margin-top: 16px;
+  border: 1px solid #dbeafe;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #eff6ff, #f8fbff);
+  padding: 15px 16px;
+  color: #1e3a8a;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
 /* ---------- shell ---------- */
 
 .shell {
@@ -2780,6 +2945,11 @@ button {
   .brandos-overview {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .how-step-grid,
+  .how-priority-grid,
+  .how-script-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .model-test-composer {
     grid-template-columns: 1fr;
   }
@@ -2841,13 +3011,17 @@ button {
   .toolbar-row,
   .toolbar-row-4,
   .rules-train-grid,
-  .action-grid {
+  .action-grid,
+  .how-step-grid,
+  .how-priority-grid,
+  .how-script-grid {
     grid-template-columns: 1fr;
   }
   .rule-action-group,
   .brand-rule-dialog-header,
   .brand-rule-side-header,
-  .brand-rule-brand-highlight-head {
+  .brand-rule-brand-highlight-head,
+  .how-hero-actions {
     flex-direction: column;
     align-items: stretch;
   }

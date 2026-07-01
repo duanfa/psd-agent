@@ -128,6 +128,16 @@ def _to_bool(value: Any, default: bool) -> bool:
     return bool(value)
 
 
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -137,6 +147,78 @@ def _string_list(value: Any) -> list[str]:
         if text and text not in items:
             items.append(text)
     return items
+
+
+def _layout_token(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    for token in ("-", " ", "/", "\\"):
+        text = text.replace(token, "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text.strip("_")
+
+
+_HERO_SECTION_ALIASES = {
+    "hero",
+    "hero_section",
+    "hero_banner",
+    "hero_slider",
+    "hero_carousel",
+    "main_image_area",
+    "main_visual",
+    "main_visual_area",
+    "primary_visual",
+    "product_display",
+    "product_hero",
+    "kv",
+}
+
+_HEADER_SECTION_ALIASES = {
+    "navigation",
+    "navbar",
+    "header",
+    "header_nav",
+    "topbar",
+    "top_bar",
+    "top_nav",
+}
+
+_HERO_SECTION_MARKERS = ("首屏", "主图", "头图", "主视觉", "kv", "hero", "banner")
+
+
+def _contains_layout_marker(value: Any, markers: tuple[str, ...]) -> bool:
+    text = str(value or "").strip().lower()
+    normalized = _layout_token(value)
+    return any(marker in text or marker in normalized for marker in markers)
+
+
+def _normalize_section_role(raw: dict[str, Any], index: int) -> str:
+    role = str(raw.get("role") or "").strip()
+    component_type = str(raw.get("component_type") or raw.get("componentType") or "").strip()
+    section_id = str(raw.get("id") or "").strip()
+    name = str(raw.get("name") or raw.get("title") or "").strip()
+    candidates = [_layout_token(item) for item in (role, component_type, section_id, name) if str(item).strip()]
+    if any(candidate in _HERO_SECTION_ALIASES for candidate in candidates):
+        return "hero"
+    if _contains_layout_marker(name, _HERO_SECTION_MARKERS) or _contains_layout_marker(
+        section_id, _HERO_SECTION_MARKERS
+    ):
+        return "hero"
+    if role:
+        return role
+    if component_type:
+        return component_type
+    return "hero" if index == 1 else "feature"
+
+
+def _is_header_like_section(section: dict[str, Any]) -> bool:
+    candidates = [
+        _layout_token(section.get("role")),
+        _layout_token(section.get("component_type")),
+        _layout_token(section.get("id")),
+        _layout_token(section.get("name")),
+    ]
+    return any(candidate in _HEADER_SECTION_ALIASES for candidate in candidates if candidate)
 
 
 class LayoutImageSlot(BaseModel):
@@ -235,12 +317,7 @@ def normalize_layout_schema_payload(
     for index, raw in enumerate(raw_sections, start=1):
         if not isinstance(raw, dict):
             continue
-        role = str(
-            raw.get("role")
-            or raw.get("component_type")
-            or raw.get("componentType")
-            or ("hero" if index == 1 else "feature")
-        ).strip() or ("hero" if index == 1 else "feature")
+        role = _normalize_section_role(raw, index)
         section_id = str(raw.get("id") or f"section_{index:02d}_{role}").strip()
         section_payload = {
             **raw,
@@ -248,7 +325,7 @@ def normalize_layout_schema_payload(
             "name": str(raw.get("name") or raw.get("title") or section_id).strip(),
             "role": role,
             "component_type": str(raw.get("component_type") or raw.get("componentType") or role).strip() or role,
-            "order": _to_int(raw.get("order") or raw.get("index"), index),
+            "order": _to_int(_coalesce(raw.get("order"), raw.get("index")), index),
             "x": _to_int(raw.get("x"), 0),
             "y": _to_int(raw.get("y"), 0),
             "w": max(1, _to_int(raw.get("w") or raw.get("width"), 790)),
@@ -490,8 +567,16 @@ def validate_layout_schema_payload(
     ]
     if not hero_sections:
         issues.append("layout_schema 缺少 Hero section")
-    elif sections and str(sections[0].get("role") or sections[0].get("component_type") or "").strip() != "hero":
-        issues.append("Hero section 必须位于首个 section")
+    else:
+        content_sections = list(sections)
+        while content_sections and _is_header_like_section(content_sections[0]):
+            content_sections.pop(0)
+        if (
+            content_sections
+            and str(content_sections[0].get("role") or content_sections[0].get("component_type") or "").strip()
+            != "hero"
+        ):
+            issues.append("Hero section 必须位于首个 section")
 
     slot_ids = [str(item.get("id") or "").strip() for item in slots]
     valid_slot_ids = {item for item in slot_ids if item}
@@ -541,7 +626,7 @@ def validate_layout_schema_payload(
                 f"section[{index}] required_image_slots 存在跨 section 槽位引用："
                 + "、".join(foreign_refs[:6])
             )
-        if section_role not in {"cta"} and not slots_by_section.get(section_id):
+        if section_role not in {"cta"} and not _is_header_like_section(section) and not slots_by_section.get(section_id):
             warnings.append(f"section[{index}] 未绑定任何 image_slot")
 
     for index, layer in enumerate(text_layers, start=1):
